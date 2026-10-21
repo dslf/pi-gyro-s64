@@ -1,0 +1,18 @@
+# Build artifacts
+viewer.exe
+*.exe
+*.o
+*.pdb
+
+# Generated test output (see tests/out/)
+tests/out/
+
+# Ad-hoc probe artifacts (frames, logs, throwaway binaries)
+trash/
+*.bmp
+*.png
+*.log
+screenshot.bmp
+
+# JS dependencies
+node_modules/

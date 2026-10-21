@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@sting8k/pi-vcc": "^0.10.2"
+  }
+}

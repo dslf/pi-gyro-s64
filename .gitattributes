@@ -1,0 +1,4 @@
+# Normalize text files to LF in the repository; working copies may be CRLF on Windows.
+* text=auto eol=lf
+*.bmp binary
+*.png binary
