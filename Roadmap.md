@@ -66,7 +66,7 @@ work approved); Discovery-блокеры E0.T6/E4.T2/E6.T3/E6.T4 остаютс�
 | E3.S4 | Клик закрепляет грань; повторный клик снимает | ✅ | wiring в `handle_mouse`, pin/unpin + printf |
 | E3.S5 | Обводка не отрывается при вращении/пане | ✅ | подсветка в координатах модели |
 | E3.S6 | Пиксельное доказательство обводки | ✅ | offscreen FBO: 148 px с обводкой, 0 после снятия |
-| E3.T1 | BVH/fast picking для крупных mesh (>1M tri) | ⬜ | риск зафиксирован в PROJECT_MEMORY §6 |
+| E3.T1 | BVH/fast picking для крупных mesh (>1M tri) | ⬜ | риск подтверждён замером E6.T5: 39.9 ms на hover-луч при 2.26M tri (17.7 ms на 1M tri) — hover обновляется не чаще ~25 луч/с |
 
 ## E4. Материалы (MTL, текстуры) (⬜ следующий после утверждения)
 
@@ -102,7 +102,7 @@ work approved); Discovery-блокеры E0.T6/E4.T2/E6.T3/E6.T4 остаютс�
 | E6.T2 | Регрессия пикселей (coverage, silhouette, shading) | ✅ | 5 моделей + ortho/fov матрицы |
 | E6.T3 | Кроссплатформенная проверка (Linux/macOS) | 🔵 | зависит от scope |
 | E6.T4 | CI-рука (или локальный gate) + фиксация артефактов | 🔵 | git + remote (public `main`) есть; gate = `tests/run_tests.ps1`, CI-рука не настроена |
-| E6.T5 | Производительность: время кадра, время picking на 1M tri | ⬜ | метрики в отчёте |
+| E6.T5 | Производительность: время кадра, время picking на крупной модели | ✅ | замер на `assets/utah_teapot_test_2mil_tri.obj` (2 250 948 tri, локальная фикстура, не публикуется): парсинг 3.02 s, peak RSS 747 MB offscreen / 764 MB интерактив, кадр 23.7 fps при 1280×900 MSAA 4 (exit 0, coverage 12.0%), picking 39.9 ms на hover-луч (17.7 ms на 1M tri, худший 44.4 ms), `obj_mesh_free` 11 ms; зонд `lab/probes/probe_bigobj.c` (PASS), отчёт `docs/reports/report_2026-10-22-e6_t5_big_model.md`; метрики зафиксированы в PROJECT_MEMORY §2/§6 |
 
 ## E7. Доставка и переносимость (⬜)
 

@@ -45,6 +45,7 @@ gcc -O2 -std=c11 -Wall -Wextra -I../../src -I../../ <зонд.c> <нужные s
 | `probe_pick.c` | `src/gl.c src/camera.c src/mesh.c src/obj.c src/vmath.c` | пиксель → NDC с `y` вниз |
 | `probe_frame.c` | `src/obj.c src/camera.c src/vmath.c` | CPU-растр как эталон против BMP `viewer.exe` (foreshortening, порядок глубины, вертикаль) |
 | `probe_bbox.c` | `src/obj.c` | bbox/spans модели (`assets/utah_teapot.obj`) |
+| `probe_bigobj.c` | `src/obj.c src/camera.c src/vmath.c` + `-lpsapi` | стресс на крупной модели: время парсинга, размеры CPU-буферов, peak RSS, стоимость `pick_triangle` на hover-лучах, время `obj_mesh_free`. Фикстура — локальная `assets/utah_teapot_test_2mil_tri.obj` (не в репозитории): `lab/probes/probe_bigobj.exe assets/utah_teapot_test_2mil_tri.obj` |
 
 ### Текст HUD: ink, контраст, глиф
 
