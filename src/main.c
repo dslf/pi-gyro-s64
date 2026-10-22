@@ -123,9 +123,23 @@ static int snapshot(app* a, const char* path) {
   return 0;
 }
 
+/* Which triangle Tab walks to next. `cur` is the pinned triangle (-1 = nothing pinned),
+   `dir` is +1 forward / -1 backward. Wrapping makes the walk a loop, so stepping past the
+   last face lands on the first one and past the first lands on the last. Returns -1 when
+   there is nothing to walk. */
+static int face_step(int cur, int total, int dir) {
+  if (total <= 0) return -1;
+  /* Nothing pinned yet: forward enters at the first face, backward at the last. */
+  if (cur < 0) return dir < 0 ? total - 1 : 0;
+  int next = cur + (dir < 0 ? -1 : 1);
+  if (next >= total) next = 0;
+  if (next < 0) next = total - 1;
+  return next;
+}
+
 static void on_key(GLFWwindow* win, int key, int scancode, int action, int mods) {
   app* a = of(win);
-  (void)scancode; (void)mods;
+  (void)scancode;
   if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
 
   if (key == GLFW_KEY_ESCAPE) glfwSetWindowShouldClose(win, 1);
@@ -134,6 +148,11 @@ static void on_key(GLFWwindow* win, int key, int scancode, int action, int mods)
   else if (key == GLFW_KEY_LEFT_BRACKET) { camera_fov_step(&a->cam, -5.0f); a->dirty = 1; }
   else if (key == GLFW_KEY_RIGHT_BRACKET) { camera_fov_step(&a->cam, 5.0f); a->dirty = 1; }
   else if (key == GLFW_KEY_R) {
+    /* Reset also releases the pin: a reset frame should not keep an old selection. */
+    if (a->locked >= 0) printf("reset: released the pin on triangle %d\n", a->locked);
+    a->locked = -1;
+    a->hover = -1;
+    renderer_set_highlight(&a->rend, &a->cpu, -1);
     camera_reset(&a->cam, a->mesh.fit);
     apply_camera_req(&a->cam, a);
     a->dirty = 1;
@@ -141,6 +160,28 @@ static void on_key(GLFWwindow* win, int key, int scancode, int action, int mods)
   else if (key == GLFW_KEY_S) snapshot(a, "screenshot.bmp");
   else if (key == GLFW_KEY_EQUAL || key == GLFW_KEY_KP_ADD) { camera_zoom(&a->cam, 1.0f); a->dirty = 1; }
   else if (key == GLFW_KEY_MINUS) { camera_zoom(&a->cam, -1.0f); a->dirty = 1; }
+  else if (key == GLFW_KEY_TAB) {
+    int dir = (mods & GLFW_MOD_SHIFT) ? -1 : 1;
+    int next = face_step(a->locked, a->cpu.triangles, dir);
+    if (next < 0) {
+      fprintf(stderr, "Tab: nothing to step through - no model loaded\n");
+      return;
+    }
+    a->locked = next;
+    a->hover = next;
+    renderer_set_highlight(&a->rend, &a->cpu, next);
+    int face = -1, v0 = -1, v1 = -1, v2 = -1;
+    char err[256] = "";
+    if (obj_triangle_identity(&a->cpu, next, &face, &v0, &v1, &v2, err, sizeof err) == 0) {
+      float n[3] = { 0, 0, 0 };
+      float len = obj_face_normal(&a->cpu, next, n);
+      printf("face %d of %d (triangle %d): vertices %d,%d,%d, normal (%.3f, %.3f, %.3f) len %.3f\n",
+             face, a->cpu.faces, next, v0, v1, v2, n[0], n[1], n[2], len);
+    } else {
+      printf("Tab: triangle %d of %d has no identity - %s\n", next, a->cpu.triangles, err);
+    }
+    a->dirty = 1;
+  }
 }
 
 static void handle_mouse(app* a) {
@@ -194,6 +235,43 @@ static void handle_mouse(app* a) {
   a->dirty = 1;
 }
 
+/* Everything the statistics card shows, computed from the app state. Kept out of draw_scene so
+   the selftest can fill the same struct and check the numbers behind the rows. */
+/* Which triangle Tab walks to next is defined above on_key; the selftest below exercises it. */
+static void hud_info_fill(const app* a, int sel, hud_info* info) {
+  info->projection = a->cam.ortho ? "ortho" : "persp";
+  info->fov_deg = a->cam.fov_deg;
+  info->cam_dist = a->cam.dist;
+  info->triangles = a->cpu.triangles;
+  info->selected = sel;
+  info->pinned = a->locked >= 0;
+  info->wireframe = a->wireframe;
+  info->fps = a->fps;
+  info->pin_nx = info->pin_ny = info->pin_nz = 0.0f;
+  info->pin_cx = info->pin_cy = info->pin_cz = 0.0f;
+  info->face_id = -1;
+  info->faces = a->cpu.faces;
+  info->vert_id[0] = info->vert_id[1] = info->vert_id[2] = 0;
+  info->normals_authored = 0;
+  info->vn_dev_deg = 0.0f;
+  if (sel >= 0 && sel < a->cpu.triangles && a->cpu.v) {
+    const float* v = a->cpu.v + (size_t)sel * 24;   /* 3 vertices, stride 8 */
+    info->pin_cx = (v[0] + v[8] + v[16]) / 3.0f;
+    info->pin_cy = (v[1] + v[9] + v[17]) / 3.0f;
+    info->pin_cz = (v[2] + v[10] + v[18]) / 3.0f;
+    float fn[3];
+    obj_face_normal(&a->cpu, sel, fn);
+    info->pin_nx = fn[0]; info->pin_ny = fn[1]; info->pin_nz = fn[2];
+    if (a->cpu.face_ids) info->face_id = a->cpu.face_ids[sel];
+    if (a->cpu.vert_ids) {
+      info->vert_id[0] = a->cpu.vert_ids[sel * 3];
+      info->vert_id[1] = a->cpu.vert_ids[sel * 3 + 1];
+      info->vert_id[2] = a->cpu.vert_ids[sel * 3 + 2];
+    }
+    info->normals_authored = obj_normal_deviation_deg(&a->cpu, sel, &info->vn_dev_deg);
+  }
+}
+
 /* Draw one frame into the default framebuffer or an offscreen target. */
 static void draw_scene(app* a, const framebuffer* fb) {
   int w = fb ? fb->w : a->width;
@@ -221,35 +299,8 @@ static void draw_scene(app* a, const framebuffer* fb) {
 
   /* HUD: statistics panel top-left, hotkey help panel bottom-centre (both in pixel space). */
   if (a->hud_overlay) {
-    int sel = a->locked >= 0 ? a->locked : a->hover;
     hud_info info;
-    info.projection = a->cam.ortho ? "ortho" : "persp";
-    info.fov_deg = a->cam.fov_deg;
-    info.cam_dist = a->cam.dist;
-    info.triangles = a->cpu.triangles;
-    info.selected = sel;
-    info.pinned = a->locked >= 0;
-    info.wireframe = a->wireframe;
-    info.fps = a->fps;
-    info.hovered = a->hover;
-    info.pin_nx = info.pin_ny = info.pin_nz = 0.0f;
-    info.pin_cx = info.pin_cy = info.pin_cz = 0.0f;
-    if (sel >= 0 && sel < a->cpu.triangles && a->cpu.v) {
-      const float* v = a->cpu.v + (size_t)sel * 24;   /* 3 vertices, stride 8 */
-      info.pin_cx = (v[0] + v[8] + v[16]) / 3.0f;
-      info.pin_cy = (v[1] + v[9] + v[17]) / 3.0f;
-      info.pin_cz = (v[2] + v[10] + v[18]) / 3.0f;
-      if (a->cpu.flags & OBJ_HAS_NORMALS) {
-        info.pin_nx = v[3]; info.pin_ny = v[4]; info.pin_nz = v[5];
-      } else {
-        float e1[3] = { v[8] - v[0], v[9] - v[1], v[10] - v[2] };
-        float e2[3] = { v[16] - v[0], v[17] - v[1], v[18] - v[2] };
-        float n[3] = { e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2],
-                       e1[0] * e2[1] - e1[1] * e2[0] };
-        float len = (float)sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
-        if (len > 1e-6f) { info.pin_nx = n[0] / len; info.pin_ny = n[1] / len; info.pin_nz = n[2] / len; }
-      }
-    }
+    hud_info_fill(a, a->locked >= 0 ? a->locked : a->hover, &info);
     hud_frame(&a->hudl, w, h, &info);
     hud_render(&a->hudl);
   }
@@ -276,8 +327,9 @@ static int load_model(app* a, const char* path) {
     fprintf(stderr, "cannot load '%s': %s\n", path, err);
     return -1;
   }
-  printf("model %s: %d triangles, %d vertices, %s%s\n", path, a->cpu.triangles, a->cpu.vcount,
-         (a->cpu.flags & OBJ_HAS_NORMALS) ? "normals" : "computed normals",
+  printf("model %s: %d faces -> %d triangles, %d vertices, %s%s\n", path, a->cpu.faces,
+         a->cpu.triangles, a->cpu.vcount,
+         (a->cpu.flags & OBJ_NORMALS_AUTHORED) ? "normals (from vn)" : "normals (computed)",
          (a->cpu.flags & OBJ_HAS_TEXCOORDS) ? " + uv" : "");
 
   if (mesh_upload(&a->cpu, &a->mesh, err, sizeof err) < 0) {
@@ -358,7 +410,7 @@ static int run_interactive(app* a, const char* model_path) {
 
   printf("resize: live repaint - frame size read from the window every frame, redraw from WM_PAINT\n");
   printf("controls: LMB rotate | RMB pan | wheel zoom | Ctrl+wheel fov | [ ] fov | O ortho/perspective\n");
-  printf("          W wire | R reset | S screenshot | hover outlines a triangle, click pins it | Esc quit\n");
+  printf("          W wire | R reset | S screenshot | Tab / Shift+Tab step faces | hover outlines, click pins | Esc quit\n");
   a->dirty = 1;
   a->hud_overlay = 1; /* the overlay belongs to the interactive window, not to measurement frames */
 
@@ -915,6 +967,30 @@ static void hud_selftest(app* a, int* fails) {
   static unsigned char px4[960 * 320 * 4];
   camera_reset(&a->cam, a->mesh.fit);
 
+  /* An explicit selection: the statistics card must show real identity rows here, not the
+     empty state, and the wiring check below needs a triangle it can name. */
+  float pick_depth = 0.0f;
+  int sel_draw = -1;
+  /* The exact centre can land on a seam between two faces, where the triangle test is
+     degenerate; scan a few nearby points and take the first real hit. */
+  float pox[5] = { 0.0f, 60.0f, -60.0f, 0.0f, 40.0f };
+  float pov[5] = { 0.0f, 0.0f, 0.0f, 40.0f, -40.0f };
+  int orig_hover = a->hover, orig_locked = a->locked;
+  for (int i = 0; i < 5 && sel_draw < 0; i++) {
+    float px = (float)(w / 2) + pox[i], py = (float)(h / 2) + pov[i];
+    sel_draw = pick_triangle(&a->cam, &a->cpu, px, py, w, h, (float)w / (float)h, &pick_depth);
+    if (sel_draw >= 0)
+      printf("  picked triangle %d at (%d, %d), depth %.4f, for the card\n", sel_draw, (int)px, (int)py, pick_depth);
+  }
+  if (sel_draw < 0) {
+    printf("  FAIL hud selftest picked nothing around the frame centre of %d x %d\n", w, h);
+    (*fails)++;
+    fb_free(&fb);
+    return;
+  }
+  a->locked = sel_draw;
+  a->hover = sel_draw;
+
   a->hud_overlay = 0;
   draw_scene(a, &fb);
   int rc = fb_read_rgba(&fb, px, err, sizeof err);
@@ -931,6 +1007,8 @@ static void hud_selftest(app* a, int* fails) {
   if (rc != 0) {
     printf("  FAIL hud readback: %s\n", err);
     (*fails)++;
+    a->hover = orig_hover;
+    a->locked = orig_locked;
     fb_free(&fb);
     return;
   }
@@ -1101,6 +1179,38 @@ static void hud_selftest(app* a, int* fails) {
              qx1 - qx0, qy1 - qy0, sx1 - sx0, sy1 - sy0);
       (*fails)++;
     }
+    /* The identity rows (face, vertices, normal, vn source) must exist only with a selection:
+       the selected card is expected to be about twice as tall as the two-line empty card. */
+    double h_ratio = (double)(sy1 - sy0) / (double)(qy1 - qy0);
+    printf("  ok   identity rows: selected card is %.2fx taller than the empty card\n", h_ratio);
+    if (h_ratio < 1.8) {
+      printf("  FAIL selected card %d x %d px vs empty %d x %d px - identity rows are missing\n",
+             sx1 - sx0, sy1 - sy0, qx1 - qx0, qy1 - qy0);
+      (*fails)++;
+    }
+    /* The rows are only worth showing if the numbers behind them are the mesh's own numbers. */
+    hud_info info;
+    hud_info_fill(a, sel_draw, &info);
+    double nl = (double)info.pin_nx * info.pin_nx + (double)info.pin_ny * info.pin_ny +
+                (double)info.pin_nz * info.pin_nz;
+    printf("  ok   card values: sel %d of %d triangles, face %d/%d, vertices %d,%d,%d, "
+           "normal (%.2f, %.2f, %.2f) len %.2f, vn %s dev %.1f deg\n", info.selected,
+           info.triangles, info.face_id, info.faces, info.vert_id[0], info.vert_id[1],
+           info.vert_id[2], info.pin_nx, info.pin_ny, info.pin_nz, nl,
+           info.normals_authored ? "file" : "computed", (double)info.vn_dev_deg);
+    int wiring_bad = info.selected < 0 || info.face_id < 0 || info.face_id >= info.faces ||
+                     info.vert_id[0] < 1 || info.vert_id[1] < 1 || info.vert_id[2] < 1 ||
+                     info.vert_id[0] == info.vert_id[1] || info.vert_id[1] == info.vert_id[2] ||
+                     info.vert_id[0] == info.vert_id[2] || nl < 0.99 || nl > 1.01 ||
+                     info.normals_authored != ((a->cpu.flags & OBJ_NORMALS_AUTHORED) != 0) ||
+                     info.vn_dev_deg < 0.0f || info.vn_dev_deg > 180.0f;
+    if (wiring_bad) {
+      printf("  FAIL card values are not the mesh's own: face %d of %d, vertices %d,%d,%d, "
+             "normal length %.2f, vn %s dev %.1f deg\n", info.face_id, info.faces,
+             info.vert_id[0], info.vert_id[1], info.vert_id[2], nl,
+             info.normals_authored ? "file" : "computed", (double)info.vn_dev_deg);
+      (*fails)++;
+    }
     if (qm.ink_n < 40 || qm.contrast < 4.5) {
       printf("  FAIL stats empty-state ink %ld px, contrast %.2f:1 - the card must stay readable\n",
              qm.ink_n, qm.contrast);
@@ -1250,6 +1360,8 @@ static void hud_selftest(app* a, int* fails) {
     }
   }
 
+  a->hover = orig_hover;
+  a->locked = orig_locked;
   fb_free(&fb);
 }
 
@@ -1329,6 +1441,164 @@ static void resize_selftest(app* a, int* fails) {
   if (!ok2) (*fails)++;
 }
 
+/* The statistics card names the face a triangle came from and the authored vertex numbers it
+   uses, so those numbers are checked against a file whose content is known exactly. The quad
+   (4 corners) fans into 2 triangles; the second face is written with negative indices. */
+static void identity_selftest(int* fails) {
+  printf("selftest: triangle identity (face ordinal, vertex numbers, normals)\n");
+  const char* src =
+    "v -0.5 -0.5 -0.5\nv 0.5 -0.5 -0.5\nv 0.5 0.5 -0.5\nv -0.5 0.5 -0.5\n"
+    "v -0.5 -0.5 0.5\nv 0.5 -0.5 0.5\nv 0.5 0.5 0.5\n"
+    "vn 0 0 1\nvn 0 1 0\nvn 0.7071 0 0.7071\n"
+    "f 1//1 2//1 3//1 4//1\n"
+    "f -3//2 -2//3 -1//2\n";
+  obj_mesh m;
+  char err[256] = "";
+  if (obj_parse_string(src, strlen(src), "identity", &m, err, sizeof err) < 0) {
+    printf("  FAIL identity fixture: %s\n", err);
+    (*fails)++;
+    return;
+  }
+
+  const int exp_face[3] = { 0, 0, 1 };
+  const int exp_vert[9] = { 1, 2, 3, 1, 3, 4, 5, 6, 7 };
+  int bad = 0;
+  if (m.faces != 2 || m.triangles != 3 || m.vcount != 9) bad++;
+  if (!m.face_ids || !m.vert_ids) {
+    printf("  FAIL parser produced no identity arrays (face_ids %p, vert_ids %p)\n",
+           (const void*)m.face_ids, (const void*)m.vert_ids);
+    (*fails)++;
+    obj_mesh_free(&m);
+    return;
+  }
+  for (int t = 0; t < 3; t++) if (m.face_ids[t] != exp_face[t]) bad++;
+  for (int i = 0; i < 9; i++) if (m.vert_ids[i] != exp_vert[i]) bad++;
+  printf("  ok   faces %d, triangles %d, face ids %d,%d,%d, vertex ids %d,%d,%d / %d,%d,%d / %d,%d,%d\n",
+         m.faces, m.triangles, m.face_ids[0], m.face_ids[1], m.face_ids[2],
+         m.vert_ids[0], m.vert_ids[1], m.vert_ids[2], m.vert_ids[3], m.vert_ids[4],
+         m.vert_ids[5], m.vert_ids[6], m.vert_ids[7], m.vert_ids[8]);
+  if (bad) {
+    printf("  FAIL identity mismatch: expected 2 faces / 3 triangles, faces 0,0,1, verts "
+           "1,2,3 1,3,4 5,6,7\n");
+    (*fails)++;
+  }
+
+  /* Face normal of the quad, and the authored normals behind it. */
+  float fn[3];
+  double nlen = obj_face_normal(&m, 0, fn);
+  double dot = fn[0] * 0.0 + fn[1] * 0.0 + fn[2] * 1.0;
+  printf("  ok   quad face normal (%.3f, %.3f, %.3f), length %.3f, dot with +z %.3f\n",
+         fn[0], fn[1], fn[2], nlen, dot);
+  if (fabs(nlen - 1.0) > 0.01 || dot < 0.999) {
+    printf("  FAIL quad face normal is not +z: (%.3f, %.3f, %.3f)\n", fn[0], fn[1], fn[2]);
+    (*fails)++;
+  }
+
+  float dev = 0.0f;
+  int authored = obj_normal_deviation_deg(&m, 0, &dev);
+  printf("  ok   quad normals: authored %d, deviation %.2f deg\n", authored, (double)dev);
+  if (!authored || dev > 1.0f) {
+    printf("  FAIL quad vertex normals deviate %.2f deg from the face normal (expected 0)\n", (double)dev);
+    (*fails)++;
+  }
+
+  float dev2 = 0.0f;
+  int auth2 = obj_normal_deviation_deg(&m, 2, &dev2);
+  float vn[3][3];
+  int vauth = obj_vertex_normals(&m, 2, vn);
+  printf("  ok   top face normals: authored %d, vertex n0 (%.3f, %.3f, %.3f), deviation %.2f deg\n",
+         vauth, vn[0][0], vn[0][1], vn[0][2], (double)dev2);
+  if (!auth2 || !vauth || fabs((double)dev2 - 90.0) > 1.0) {
+    printf("  FAIL top face deviation %.2f deg, expected 90 (vn of corner 5 is +y)\n", (double)dev2);
+    (*fails)++;
+  }
+
+  /* A mesh without vn: normals are computed, so the deviation metric must report "not authored". */
+  obj_mesh nov;
+  char err3[256] = "";
+  if (obj_parse_file("assets/nov.obj", &nov, err3, sizeof err3) == 0) {
+    float dnov = 1.0f;
+    int a3 = obj_normal_deviation_deg(&nov, 0, &dnov);
+    float nvn[3][3];
+    int v3 = obj_vertex_normals(&nov, 0, nvn);
+    printf("  ok   nov.obj (no vn): authored %d, deviation %.2f deg, vertex normals (%.3f, %.3f, %.3f)\n",
+           a3, (double)dnov, nvn[0][0], nvn[0][1], nvn[0][2]);
+    if (a3 != 0 || v3 != 0 || dnov != 0.0f) {
+      printf("  FAIL nov.obj claims authored normals (%d) or deviation %.2f deg\n", a3, (double)dnov);
+      (*fails)++;
+    }
+    obj_mesh_free(&nov);
+    if (nov.face_ids || nov.vert_ids || nov.v) {
+      printf("  FAIL obj_mesh_free left identity arrays behind\n");
+      (*fails)++;
+    }
+  } else {
+    printf("  FAIL cannot load assets/nov.obj: %s\n", err3);
+    (*fails)++;
+  }
+
+  /* Bad triangle index is an error path, not a silent zero normal. */
+  float fbad[3] = { 9, 9, 9 };
+  if (obj_face_normal(&m, -1, fbad) != 0 || obj_normal_deviation_deg(&m, 99, &dev) != 0) {
+    printf("  FAIL out-of-range triangle accepted silently\n");
+    (*fails)++;
+  } else {
+    printf("  ok   out-of-range triangle rejected (face normal and deviation both 0)\n");
+  }
+
+  obj_mesh_free(&m);
+  if (m.face_ids || m.vert_ids || m.v) {
+    printf("  FAIL obj_mesh_free left identity arrays behind\n");
+    (*fails)++;
+  }
+}
+
+/* Tab stepping: the walk must loop, and backward from the first face must land on the last.
+   Pure function, so this is checked without a window. */
+static void face_step_selftest(int* fails) {
+  struct { int cur, dir, total, want; } cases[] = {
+    { -1, 1, 12, 0 },   /* nothing pinned: forward lands on the first face */
+    { 0, 1, 12, 1 },
+    { 11, 1, 12, 0 },   /* forward past the last face wraps to the first */
+    { 0, -1, 12, 11 },  /* backward past the first wraps to the last */
+    { 5, -1, 12, 4 },
+    { 3, 1, 0, -1 },    /* no model: nothing to step through */
+  };
+  for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+    int got = face_step(cases[i].cur, cases[i].total, cases[i].dir);
+    if (got != cases[i].want) {
+      printf("  FAIL face_step from %d %s over %d faces gives %d, expected %d\n",
+             cases[i].cur, cases[i].dir < 0 ? "backward" : "forward", cases[i].total, got, cases[i].want);
+      (*fails)++;
+    }
+  }
+  printf("  ok   Tab stepping loops: -1->0, 11->0 forward, 0->11 backward\n");
+
+  /* The stepped triangle must still be the file's own face: stepping forward from the first
+     triangle of quad_vvn.obj lands on face 1, the second authored face. */
+  obj_mesh m;
+  char err[256] = "";
+  if (obj_parse_file("assets/quad_vvn.obj", &m, err, sizeof err) < 0) {
+    printf("  FAIL stepping fixture: %s\n", err);
+    (*fails)++;
+    return;
+  }
+  int step = face_step(0, m.triangles, 1);
+  int face = -1, v0 = -1, v1 = -1, v2 = -1;
+  char ident_err[256] = "";
+  if (obj_triangle_identity(&m, step, &face, &v0, &v1, &v2, ident_err, sizeof ident_err) < 0) {
+    printf("  FAIL stepped triangle %d has no identity: %s\n", step, ident_err);
+    (*fails)++;
+  } else {
+    printf("  ok   Tab from triangle 0 -> triangle %d, face %d, vertices %d,%d,%d\n", step, face, v0, v1, v2);
+    if (face != 1) {
+      printf("  FAIL stepping gives face %d, expected face 1\n", face);
+      (*fails)++;
+    }
+  }
+  obj_mesh_free(&m);
+}
+
 static int run_selftest(app* a) {
   int fails = 0;
   printf("selftest: OBJ parser\n");
@@ -1339,9 +1609,19 @@ static int run_selftest(app* a) {
   expect_parse_failure("assets/bad.obj", &fails);
   expect_parse_failure("assets/bad_index.obj", &fails);
   expect_mesh("assets/utah_teapot.obj", 1250, OBJ_HAS_NORMALS | OBJ_HAS_TEXCOORDS, &fails);
+  identity_selftest(&fails);
+  face_step_selftest(&fails);
 
   printf("selftest: BMP orientation\n");
   expect_bmp_orientation(&fails);
+
+  /* The app's own model: draw_scene, picking and the HUD card all read it, so load it once
+     here instead of leaving a->cpu empty for the phases below. */
+  printf("selftest: app model for HUD and picking\n");
+  if (load_model(a, "assets/cube.obj") < 0) {
+    printf("  FAIL cannot load assets/cube.obj into the app\n");
+    fails++;
+  }
 
   printf("selftest: shader + offscreen pixels\n");
   char err[256] = "";
@@ -1365,7 +1645,10 @@ static int run_selftest(app* a) {
           if (!ok) fails++;
 
           /* The same model through perspective, a narrow and a wide fov, and
-             orthographic projection must produce visibly different silhouettes. */
+             orthographic projection must produce visibly different silhouettes. The model is
+             turned off the axis-aligned default view first: facing a cube head-on makes
+             perspective and orthographic silhouettes nearly identical, which would prove
+             nothing about depth. */
           double cov[4] = { 0, 0, 0, 0 };
           const float fovs[4] = { 45.0f, 15.0f, 80.0f, 45.0f };
           int pixels_ok = 1;
@@ -1373,6 +1656,7 @@ static int run_selftest(app* a) {
             camera_reset(&a->cam, a->mesh.fit);
             camera_set_fov(&a->cam, fovs[i]);
             a->cam.ortho = (i == 3);
+            camera_orbit(&a->cam, 110.0f, 60.0f);   /* tilt: near faces get closer, far ones shrink */
             draw_scene(a, &fb);
             if (fb_read_rgba(&fb, px, err, sizeof err) != 0) { pixels_ok = 0; break; }
             cov[i] = img_changed_fraction(px, 128, 128, 8);

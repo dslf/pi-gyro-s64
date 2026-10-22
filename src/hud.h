@@ -19,9 +19,13 @@ typedef struct {
   int pinned;              /* 1 = selection pinned by a click, 0 = hover */
   int wireframe;
   double fps;              /* measured frames/second; 0 = not measured yet */
-  int hovered;             /* triangle under the cursor, -1 = none */
   float pin_nx, pin_ny, pin_nz;   /* normal of the selected face */
   float pin_cx, pin_cy, pin_cz;   /* centroid of the selected face, model space */
+  int   face_id;                  /* 0-based ordinal of the OBJ face, -1 = unknown */
+  int   faces;                    /* faces parsed from the file */
+  int   vert_id[3];               /* 1-based vertex numbers of the selected triangle */
+  int   normals_authored;         /* 1 = vn came from the file, 0 = computed by the parser */
+  float vn_dev_deg;               /* max angle vertex normal vs face normal, degrees */
 } hud_info;
 
 typedef struct {

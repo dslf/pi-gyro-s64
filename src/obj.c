@@ -89,10 +89,11 @@ static int parse_corner(const char* s, corner* c, int posn, int texn, int nrnn) 
   }
 
   if (val[0] == 0) return -1;                 /* OBJ indices are 1-based; 0 is invalid */
-  if (val[0] < 0) val[0] = posn + val[0];     /* negative = relative to the end */
-  if (val[1] < 0) val[1] = texn + val[1];
-  if (val[2] < 0) val[2] = nrnn + val[2];
-  val[0]--; val[1]--; val[2]--;               /* to 0-based */
+  /* A negative index counts back from the end: -1 is the last vertex, so count + val is
+     already the 0-based slot. Positive indices are 1-based and must be shifted down. */
+  if (val[0] < 0) val[0] = posn + val[0]; else val[0]--;
+  if (val[1] < 0) val[1] = texn + val[1]; else val[1]--;
+  if (val[2] < 0) val[2] = nrnn + val[2]; else val[2]--;
 
   c->p = val[0]; c->t = val[1]; c->n = val[2];
   if (c->p < 0 || c->p >= posn) return -1;
@@ -118,6 +119,9 @@ static int parse_into(const char* text, size_t len, const char* name, obj_mesh* 
   buf[len] = '\0';
 
   int bad_faces = 0;
+  int faces = 0;                    /* valid faces, in file order - the HUD shows this ordinal */
+  int_arr face_id = {0};            /* one ordinal per triangle, so a fan keeps its face */
+  int_arr vert_id = {0};            /* 1-based vertex number per corner, as authored in the file */
   char* p = buf;
   char* tok[64];
 
@@ -151,16 +155,24 @@ static int parse_into(const char* text, size_t len, const char* name, obj_mesh* 
 
       corner c[64];
       int ok = 1;
+      /* Corner indices count vertices / uv / normals, not the float slots behind them. */
       for (int i = 0; i < cnt; i++) {
-        if (parse_corner(tok[i + 1], &c[i], (int)pos.n, (int)tex.n, (int)nrm.n) < 0) { ok = 0; break; }
+        if (parse_corner(tok[i + 1], &c[i], (int)(pos.n / 3), (int)(tex.n / 2), (int)(nrm.n / 3)) < 0) { ok = 0; break; }
       }
       if (!ok) { bad_faces++; continue; }
 
+      /* Identity for the HUD: which face this triangle came from and which vertex number
+         each corner is. Malformed faces are skipped, so the ordinal counts valid faces. */
       for (int i = 1; i + 1 < cnt; i++) {
+        i_push(&face_id, faces);
+        i_push(&vert_id, c[0].p + 1);
+        i_push(&vert_id, c[i].p + 1);
+        i_push(&vert_id, c[i + 1].p + 1);
         i_push(&tri, c[0].p); i_push(&tri, c[0].t); i_push(&tri, c[0].n);
         i_push(&tri, c[i].p); i_push(&tri, c[i].t); i_push(&tri, c[i].n);
         i_push(&tri, c[i + 1].p); i_push(&tri, c[i + 1].t); i_push(&tri, c[i + 1].n);
       }
+      faces++;
     }
     /* g / o / usemtl / mtllib / s / l are ignored in this milestone */
   }
@@ -186,7 +198,7 @@ static int parse_into(const char* text, size_t len, const char* name, obj_mesh* 
         (classic Z-up exports: Blender/3ds Max/obj -> z from 0 upward);
      2. otherwise a model whose z span clearly exceeds its y span is Z-up.
      A model centred on the origin is left alone (OBJ's Y-up convention). */
-  int up = 1;
+  int up = 2;               /* OBJ's own convention: Y is up unless the model says otherwise */
   float asym[3];
   for (int k = 0; k < 3; k++) {
     float denom = ext[k] > 1e-6f ? ext[k] : 1.0f;
@@ -234,6 +246,7 @@ static int parse_into(const char* text, size_t len, const char* name, obj_mesh* 
   out->v = malloc((size_t)tri.n / 3 * 8 * sizeof(float));   /* tris*3 vertices, 8 floats each */
   if (!out->v) {
     free(tmp); free(face_n.d); free(pos.d); free(tex.d); free(nrm.d); free(tri.d);
+    free(face_id.d); free(vert_id.d);
     snprintf(err, errcap, "out of memory");
     return -1;
   }
@@ -296,9 +309,13 @@ static int parse_into(const char* text, size_t len, const char* name, obj_mesh* 
 
   free(tmp); free(face_n.d); free(pos.d); free(tex.d); free(nrm.d); free(tri.d);
 
+  out->face_ids = face_id.d;        /* owned by obj_mesh, freed in obj_mesh_free */
+  out->vert_ids = vert_id.d;
+  out->faces = faces;
   out->vcount = tris * 3;
   out->triangles = tris;
-  out->flags = OBJ_HAS_NORMALS | (has_uv ? OBJ_HAS_TEXCOORDS : 0);
+  out->flags = OBJ_HAS_NORMALS | (has_uv ? OBJ_HAS_TEXCOORDS : 0) |
+               (has_nrm ? OBJ_NORMALS_AUTHORED : 0);
   dup_str(name, strlen(name), out->name, sizeof out->name);
   return 0;
 }
@@ -328,8 +345,97 @@ int obj_parse_file(const char* path, obj_mesh* out, char* err, size_t errcap) {
   return rc;
 }
 
+/* Largest angle between the authored vertex normals of a triangle and its face normal,
+   in degrees. Returns 0 when the model carries no authored normals (out_deg set to 0). */
+int obj_normal_deviation_deg(const obj_mesh* m, int tri, float* out_deg);
+
 void obj_mesh_free(obj_mesh* m) {
   if (!m) return;
   free(m->v);
+  free(m->face_ids);
+  free(m->vert_ids);
   memset(m, 0, sizeof *m);
+}
+
+/* A corner of triangle `tri` in the interleaved array: 8 floats x y z nx ny nz u v. */
+static const float* obj_corner(const obj_mesh* m, int tri, int k) {
+  return m->v + (size_t)(tri * 3 + k) * 8;
+}
+
+int obj_face_normal(const obj_mesh* m, int tri, float dst[3]) {
+  if (!m || !m->v || tri < 0 || tri >= m->triangles) return 0;
+  const float* a = obj_corner(m, tri, 0);
+  const float* b = obj_corner(m, tri, 1);
+  const float* c = obj_corner(m, tri, 2);
+  float e1[3] = { b[0] - a[0], b[1] - a[1], b[2] - a[2] };
+  float e2[3] = { c[0] - a[0], c[1] - a[1], c[2] - a[2] };
+  float n[3] = { e1[1] * e2[2] - e1[2] * e2[1],
+                 e1[2] * e2[0] - e1[0] * e2[2],
+                 e1[0] * e2[1] - e1[1] * e2[0] };
+  float len = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+  if (len <= 1e-6f) {
+    /* A degenerate triangle still needs the authored normal, if the file carries vn. */
+    if (m->flags & OBJ_NORMALS_AUTHORED) {
+      dst[0] = a[3]; dst[1] = a[4]; dst[2] = a[5];
+      return sqrtf(a[3] * a[3] + a[4] * a[4] + a[5] * a[5]);
+    }
+    dst[0] = 0.0f; dst[1] = 1.0f; dst[2] = 0.0f;
+    return 0.0f;
+  }
+  dst[0] = n[0] / len; dst[1] = n[1] / len; dst[2] = n[2] / len;
+  return len;
+}
+
+int obj_vertex_normals(const obj_mesh* m, int tri, float dst[3][3]) {
+  if (!m || !m->v || tri < 0 || tri >= m->triangles) return 0;
+  for (int k = 0; k < 3; k++) {
+    const float* c = obj_corner(m, tri, k);
+    dst[k][0] = c[3]; dst[k][1] = c[4]; dst[k][2] = c[5];
+  }
+  return (m->flags & OBJ_NORMALS_AUTHORED) ? 1 : 0;
+}
+
+int obj_normal_deviation_deg(const obj_mesh* m, int tri, float* out_deg) {
+  if (!out_deg) return 0;
+  *out_deg = 0.0f;
+  if (!m || !(m->flags & OBJ_NORMALS_AUTHORED)) return 0;
+  float fn[3];
+  if (obj_face_normal(m, tri, fn) <= 0.0f) return 0;
+  float vn[3][3];
+  if (!obj_vertex_normals(m, tri, vn)) return 0;
+  float worst = 0.0f;
+  for (int k = 0; k < 3; k++) {
+    float dot = vn[k][0] * fn[0] + vn[k][1] * fn[1] + vn[k][2] * fn[2];
+    if (dot > 1.0f) dot = 1.0f;
+    if (dot < -1.0f) dot = -1.0f;
+    float deg = acosf(dot) * (180.0f / 3.14159265358979323846f);
+    if (deg > worst) worst = deg;
+  }
+  *out_deg = worst;
+  return 1;
+}
+
+int obj_triangle_identity(const obj_mesh* m, int tri, int* face_out, int* v0, int* v1, int* v2,
+                          char* err, size_t errcap) {
+  if (!m || !m->v) {
+    snprintf(err, errcap, "obj_triangle_identity: no mesh");
+    return -1;
+  }
+  if (tri < 0 || tri >= m->triangles) {
+    snprintf(err, errcap, "obj_triangle_identity: triangle %d is outside 0..%d", tri, m->triangles - 1);
+    return -1;
+  }
+  if (!m->face_ids || !m->vert_ids) {
+    snprintf(err, errcap, "obj_triangle_identity: mesh %s carries no face or vertex numbers", m->name);
+    return -1;
+  }
+  if (!face_out || !v0 || !v1 || !v2) {
+    snprintf(err, errcap, "obj_triangle_identity: missing output slots");
+    return -1;
+  }
+  *face_out = m->face_ids[tri];
+  *v0 = m->vert_ids[tri * 3];
+  *v1 = m->vert_ids[tri * 3 + 1];
+  *v2 = m->vert_ids[tri * 3 + 2];
+  return 0;
 }

@@ -24,11 +24,11 @@
 
 /* Hotkey hints live in the help panel, not in the statistics panel. */
 static const char* HUD_HINT_KEYS =
-  "LMB drag - rotate   MMB drag - pan   wheel - zoom   keys 1..6 - presets   F - fullscreen   "
-  "W - wire   A/B/S - shading   O - outline   C - reset   H - HUD   P - screenshot   Esc - quit";
+  "LMB drag - rotate   RMB drag - pan   wheel - zoom   Ctrl+wheel - viewing angle   [ ] - viewing angle   "
+  "= / - zoom   W - wireframe   O - ortho / perspective   R - reset camera and pin   S - screenshot   Esc - quit";
 static const char* HUD_HINT_PICK =
-  "drag - nearest face under cursor   pin: LMB on face   R - release pin   T - track nearest   "
-  "Ctrl - pick per frame   Shift - 5x picking rate   Alt - drag without picking";
+  "hover - outlines the triangle under the cursor   click - pin it   click again - release   "
+  "Tab / Shift+Tab - step through faces   the selection is listed in the statistics card";
 
 static float env_f(const char* name, float fallback) {
   const char* v = getenv(name);
@@ -183,9 +183,20 @@ void hud_frame(hud* h, int w, int h_px, const hud_info* info) {
       igTextUnformatted(line, NULL);
 
       if (info->selected >= 0) {
-        snprintf(line, sizeof line, "%s  face %d  n=(%.2f, %.2f, %.2f)  pt=(%.1f, %.1f, %.1f)",
-                 info->pinned ? "pinned" : "hover", info->hovered ? info->hovered : info->selected,
+        /* Identity of the highlighted triangle: which face of the file it came from and which
+           authored vertex numbers it uses. face_id counts valid faces, in file order. */
+        snprintf(line, sizeof line, "%s  face %d/%d  tri %d  v %d,%d,%d",
+                 info->pinned ? "pinned" : "hover", info->face_id, info->faces,
+                 info->selected, info->vert_id[0], info->vert_id[1], info->vert_id[2]);
+        igTextUnformatted(line, NULL);
+
+        snprintf(line, sizeof line, "n=(%.2f, %.2f, %.2f)  pt=(%.1f, %.1f, %.1f)",
                  info->pin_nx, info->pin_ny, info->pin_nz, info->pin_cx, info->pin_cy, info->pin_cz);
+        igTextUnformatted(line, NULL);
+
+        /* Where the normal came from and how far the vertex normals bend away from it. */
+        snprintf(line, sizeof line, "vn %s%s", info->normals_authored ? "file" : "computed",
+                 info->normals_authored ? "  dev %.1f deg" : "");
         igTextUnformatted(line, NULL);
       }
     }
