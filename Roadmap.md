@@ -82,7 +82,7 @@ work approved); Discovery-блокеры E0.T6/E4.T2/E6.T3/E6.T4/E7.T1 оста�
 | ID | История / Задача | Статус | Acceptance |
 |---|---|---|---|
 | E5.S1 | Понятный статус окна (fov, dist, проекция, FPS) | ✅ | окно + HUD: проекция, fov, dist, FPS, треугольники, выбор, wireframe (`src/main.c` → `hud_frame`) |
-| E5.T5 | Dear ImGui (cimgui, C ABI) как основа HUD: FPS, подсказки горячих клавиш, читаемый контраст | ✅ | перенесено в продукт (`src/hud.c`, `deps/imgui/libcimgui.a`); selftest: hud rect 8..488 × 8..120, ink coverage 17.19%, контраст 6.36:1 (WCAG AA), короткие штрихи 2039 против длинных 6, 0 px на повторном кадре |
+| E5.T5 | Dear ImGui (cimgui, C ABI) как основа HUD: FPS, подсказки горячих клавиш, читаемый контраст | ✅ | перенесено в продукт (`src/hud.c`, `deps/imgui/libcimgui.a`); профиль по умолчанию scale 1.0, панель 380×96; selftest: hud rect 8..388 × 8..104, ink coverage 13.00%, контраст 6.43:1 (WCAG AA), короткие штрихи 1470 против длинных 1, 0 px на повторном кадре |
 | E5.T6 | Сборка vendored `deps/imgui` (`libcimgui.a`) отдельным скриптом; продукт остаётся C11 | ✅ | `deps/imgui/build.ps1` (инкрементально, проверка exported C-символов), Makefile `imgui` target линкуется; продукт — C11 + `-static-libstdc++` |
 | E5.T1 | HUD: подсказки, выбранный треугольник (id/normals) | 🟡 | горячие клавиши и выбор (hover/pinned, face normals) в HUD есть; `id` треугольника — 🔵 следующий шаг |
 | E5.T4 | Глиф-атлас: `GDI TextOutW` → CPU маска глифов как источник HUD-текста | ✅ | перенесено в продукт (`src/hud.c`, `shaders/hud.vert/frag`); selftest: coverage 0.99%, centroid top-left, штрихи глифа 0..30% (mean 9.5%), ориентация top-down (direct 0.126 < mirrored 0.158), детерминизм 0 px. **Заменено ImGui (E5.T5): GDI-путь и `shaders/hud.*` удалены из продукта** |
