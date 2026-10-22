@@ -8,9 +8,13 @@ SRC = src/main.c src/gl.c src/vmath.c src/camera.c src/obj.c src/mesh.c \
 HDR = src/gl.h src/vmath.h src/obj.h src/mesh.h src/camera.h src/render.h src/img.h src/hud.h
 SH  = shaders/model.vert shaders/model.frag
 
-OUT = build
+# Owner decision (PROJECT_MEMORY.md §4.20): the product binary lives at the repo root, so
+# relative paths (assets/, shaders/) resolve from the repo root as before. `build/` is frozen:
+# not used for the binary, reserved for temporary build files (objects) if ever needed.
+BIN     = viewer.exe
+OBJDIR  = build
 
-all: $(OUT)/viewer.exe
+all: $(BIN)
 
 imgui: $(IMGUI)
 
@@ -18,17 +22,17 @@ imgui: $(IMGUI)
 $(IMGUI): deps/imgui/build.ps1 deps/imgui/cimgui.cpp deps/imgui/cimgui.h
 	powershell -NoProfile -ExecutionPolicy Bypass -File deps/imgui/build.ps1
 
-# Binaries live in build/ (git-ignored); the directory is created on demand so the
-# Makefile stays portable (sh on POSIX, sh on Windows via GNU Make 4.4).
-$(OUT)/viewer.exe: $(SRC) $(HDR) $(SH) $(IMGUI)
-	mkdir -p $(OUT)
+# The binary is produced at the repo root (git-ignored); the frozen build/ directory holds only
+# temporary files such as *.o and is never created by the default build.
+$(BIN): $(SRC) $(HDR) $(SH) $(IMGUI)
 	$(CC) $(CFLAGS) $(SRC) -o $@ $(IMGUI) $(LDFLAGS)
 
-test: $(OUT)/viewer.exe
+test: $(BIN)
 	powershell -NoProfile -ExecutionPolicy Bypass -File tests/run_tests.ps1
 
 clean:
-	rm -f $(OUT)/viewer.exe out_*.bmp screenshot.bmp
+	rm -f $(BIN) out_*.bmp screenshot.bmp
+	rm -f $(OBJDIR)/*.o
 	rm -rf deps/imgui/build
 
 .PHONY: all imgui test clean

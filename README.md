@@ -53,15 +53,18 @@ C11 без внешних библиотек кроме GLFW и Dear ImGui. **П
 
 ```sh
 make imgui      # на чистом клоне сначала: собирает vendored Dear ImGui (libcimgui.a)
-make            # build/viewer.exe (GCC + mingw-w64; линк GLFW/imgui статически)
+make            # viewer.exe в корень репозитория (GCC + mingw-w64; линк GLFW/imgui статически)
 make test       # selftest + tests/run_tests.ps1
 ```
 
+Запускать нужно **из корня репозитория**: `assets/` и `shaders/` резолвятся относительно текущего
+каталога (не относительно бинаря), поэтому `./viewer.exe` из `build/` не найдёт модель.
+
 ```sh
-./build/viewer.exe                     # Utah teapot
-./build/viewer.exe assets/cube.obj     # свой файл
-./build/viewer.exe --render assets/cube.obj tests/out/frame.bmp 800 600   # offscreen BMP без окна
-./build/viewer.exe --selftest          # 10 разделов, 60 численных проверок
+./viewer.exe                     # Utah teapot
+./viewer.exe assets/cube.obj     # свой файл
+./viewer.exe --render assets/cube.obj tests/out/frame.bmp 800 600   # offscreen BMP без окна
+./viewer.exe --selftest          # 10 разделов, 60 численных проверок
 ```
 
 ### Управление
@@ -85,7 +88,7 @@ make test       # selftest + tests/run_tests.ps1
 
 ## Проверка
 
-Публичная проверка — `make test`: сборка, `build/viewer.exe --selftest` (10 разделов, 60 проверок, exit 0),
+Публичная проверка — `make test`: сборка, `./viewer.exe --selftest` (10 разделов, 60 проверок, exit 0),
 `tests/run_tests.ps1` (BMP-метрики: coverage, outline, picking, resize, wireframe, offscreen).
 Проверки числовые; пороги относительные.
 
@@ -97,7 +100,8 @@ shaders/     GLSL 460 core
 assets/      тестовые модели (cube, teapot)
 tests/       PS1 + Python проверка пикселей
 docs/        скриншот для README + отчёты шага (docs/reports/)
-build/       бинари продукта (`make` кладёт build/viewer.exe; каталог git-ignored)
+build/       замороженный scratch (git-ignored): бинаря продукта там нет, только временные файлы
+             сборки (`*.o`) если понадобятся
 lab/probes/  изолированные зонды ABI/GL/HUD — см. lab/probes/README.md
 deps/imgui/  vendored Dear ImGui (MIT) + libcimgui.a
 Roadmap.md   фазы E0…E7 и статусы

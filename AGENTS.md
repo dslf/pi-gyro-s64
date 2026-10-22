@@ -74,8 +74,8 @@ GLFW статический; свои `mat4` (`vmath`); ручной GL-загр
 
 ## 3. Роль: QA (Verification)
 
-- Команды проверки: `make`, `./build/viewer.exe --selftest`, `powershell -File tests/run_tests.ps1`.
-  Ожидаем: чистый сборочный вывод, `selftest: PASS`, `tests: PASS`, exit 0.
+- Команды проверки: `make`, `./viewer.exe --selftest`, `powershell -File tests/run_tests.ps1` — все
+  из корня репозитория. Ожидаем: чистый сборочный вывод, `selftest: PASS`, `tests: PASS`, exit 0.
 - Проверять **поведение**, а не намерение: drag-конвенция (проекции граней до/после), nearest-first
   picking, pixel-y, outline-пиксели, коды возврата на плохых входах.
 - Регрессия: не менять существующие пороги, чтобы «зеленовать» — новый код должен пройти старые.
@@ -89,15 +89,20 @@ GLFW статический; свои `mat4` (`vmath`); ручной GL-загр
 src/         продукт (C11)                shaders/  GLSL (460 core)
 tests/       PS1 + Python проверка        assets/   тестовые OBJ (трекаются)
 deps/imgui   vendored cimgui + imgui      docs/     скриншот README + отчёты шага
-docs/reports трекаемые отчёты шага        build/    бинари продукта (git-ignored)
+docs/reports трекаемые отчёты шага        build/    замороженный scratch (git-ignored)
 lab/probes   изолированные зонды          trash/    рабочий scratch (не публикуется)
 ```
 
-Каталогная политика (ADR `PROJECT_MEMORY.md` §4.10/§4.15/§4.19): корень — только источники и
-документы; бинарь продукта — `build/viewer.exe` (каталог игнорирует git, создаётся `make`), вывод
-тестов — `tests/out/`, артефакты зондов — `lab/probes/`, кадры для публикации — только `docs/`,
-отчёты шага — `docs/reports/` (трекаются), scratch/harness-лог — `trash/` (не публикуется).
-`artifacts/` как каталог продукта не заведен (E7.T1).
+Каталогная политика (ADR `PROJECT_MEMORY.md` §4.10/§4.15/§4.19/§4.20): бинарь продукта —
+`viewer.exe` в корень (git-ignored, создаётся `make`); запуск только из корня, потому что
+`assets/…obj` и `shaders/…glsl` резолвятся относительно cwd. `build/` заморожен: бинаря там нет,
+допустимы только временные файлы сборки (`*.o`). В корне кроме источников/документов остаются
+только ignored-артефакты (`viewer.exe`, `screenshot.bmp`, `out_*.bmp`, `probe_*`). Вывод тестов —
+`tests/out/`, артефакты зондов — `lab/probes/`, кадры для публикации — только `docs/`, отчёты
+шага — `docs/reports/` (трекаются), scratch/harness-лог — `trash/` (не публикуется).
+`artifacts/` как каталог продукта не заведен (E7.T1). Крупные стресс-фикстуры остаются локально и
+не публикуются (owner'ское решение 2026-10-22): `assets/*_test_*.obj` игнорируется git, в remote
+не уходит; трекаемые входные модели — `assets/cube.obj`, `assets/utah_teapot.obj` и fixtures.
 
 ## 5. Формат отчёта о шаге (после реализации)
 
@@ -129,16 +134,17 @@ harness и `lab/`-прототипах (п.8).
    как «уже есть»; если нужно — одна отдельная строка «что планируется».
 4. Стек и зависимости: что vendored (`deps/imgui`), что берётся из тулчейна (GLFW), чего нет.
 5. **Сборка и запуск** — команды, которые реально существуют и зелёные: `make imgui`, `make`,
-   `./build/viewer.exe <model>`, `./build/viewer.exe --selftest`, `make test`; ключевые CLI-опции
+   `./viewer.exe <model>`, `./viewer.exe --selftest`, `make test`; ключевые CLI-опции
    текущего парсера/камеры (`--render`, `--fov`, `--ortho`, `--yaw/--pitch`, `--size`, `--wire`,
-   `--idle-report`, `--selftest`, `--help`). Бинарь лежит в `build/`, не в корне.
+   `--idle-report`, `--selftest`, `--help`). Бинарь — `viewer.exe` в корень (git-ignored); запуск
+   из корня репозитория, пути `assets/` и `shaders/` относительно cwd.
 6. **Управление** — таблица hotkeys как **копия реального кэймапа** `src/main.c` (`on_key`,
    обработка мыши/колеса). Никаких «желаемых» клавиш.
 7. **Проверка** — как проект проверяется численно: сколько разделов и проверок в `--selftest`,
    что мерит `tests/run_tests.ps1` (coverage, outline, picking, resize, wireframe, ориентация
    BMP), что пороги относительные.
-8. **Структура репозитория** — назначение `src/`, `shaders/`, `tests/`, `assets/`, `build/`,
-   `lab/probes/`, `deps/imgui`, `docs/` (скриншот + отчёты шага) и одна короткая строка про
+8. **Структура репозитория** — назначение `src/`, `shaders/`, `tests/`, `assets/`, `build/`
+   (замороженный scratch), `lab/probes/`, `deps/imgui`, `docs/` (скриншот + отчёты шага) и одна короткая строка про
    «как разрабатывается» (harness pi.dev, isolated-прототипы в `lab/`) — без регламента,
    без токенов и лимитов, без ADR-номеров.
 9. **«Ограничения и открытые задачи»** — коротко и честно: что не замерено, что Windows-only, что
@@ -159,8 +165,8 @@ hotkeys, CLI-опции, формат данных, команды сборки,
 **Проверка после правки README (минимальная):**
 
 ```powershell
-make imgui; make; ./build/viewer.exe --selftest; make test   # каждая команда из README существует и зелёная
+make imgui; make; ./viewer.exe --selftest; make test   # каждая команда из README существует и зелёная
 Select-String -Path src/main.c -Pattern 'GLFW_KEY_'    # каждая клавиша из таблицы присутствует в коде
 Test-Path docs/viewer-window.png                        # путь скриншота существует
-./build/viewer.exe --selftest | Select-String '^selftest: '  # число разделов/проверок совпадает с README
+./viewer.exe --selftest | Select-String '^selftest: '  # число разделов/проверок совпадает с README
 ```

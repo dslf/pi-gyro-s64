@@ -28,3 +28,7 @@ tests/out/
 
 # Test models are product inputs, not artifacts
 !assets/*.obj
+
+# Large stress fixtures stay local and are never published (owner decision 2026-10-22):
+# they are too big for the remote repository and are not needed there.
+assets/*_test_*.obj
