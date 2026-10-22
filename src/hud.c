@@ -7,9 +7,12 @@
 #include "hud.h"
 
 #include <GLFW/glfw3.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
+#include <float.h>
 
 /* Readability profile: ImGui glyphs at font scale 1 are far cleaner than the old GDI atlas.
    Env overrides (HUD_FONT_SCALE, HUD_W, HUD_HELP_W) exist for tuning - the pixel selftest
@@ -21,11 +24,16 @@
 #define HUD_STATS_W 0.0f    /* 0 = auto width; HUD_W pins it when set */
 #define HUD_HELP_MIN_W 300.0f   /* floor: width normally comes from the hint strings themselves */
 #define HUD_HELP_MAX_W 760.0f   /* ceiling: wider hints wrap into more lines, not a full-width bar */
+#define HUD_SETTINGS_W 460.0f   /* pinned widget-panel width; HUD_SETTINGS_W overrides it; settings.ini default is the same */
+/* Below this much space under the statistics card the settings panel is not drawn at all: a
+   panel covering the card or the hints is worse than a panel that is absent. */
+#define HUD_SETTINGS_MIN_H 120.0f
 
 /* Hotkey hints live in the help panel, not in the statistics panel. */
 static const char* HUD_HINT_KEYS =
   "LMB drag - rotate   RMB drag - pan   wheel - zoom   Ctrl+wheel - viewing angle   [ ] - viewing angle   "
-  "= / - zoom   W - wireframe   O - ortho / perspective   R - reset camera and pin   S - screenshot   Esc - quit";
+  "= / - zoom   W - wireframe   O - ortho / perspective   R - reset camera and pin   S - screenshot   "
+  "H - information panels   P - settings panel   Esc - quit";
 static const char* HUD_HINT_PICK =
   "hover - outlines the triangle under the cursor   click - pin it   click again - release   "
   "Tab / Shift+Tab - step through faces   the selection is listed in the statistics card";
@@ -44,7 +52,10 @@ static float measure_help_width(void) {
   const ImGuiStyle* st = igGetStyle();
   ImVec2 s1 = igCalcTextSize(HUD_HINT_KEYS, NULL, false, -1.0f);
   ImVec2 s2 = igCalcTextSize(HUD_HINT_PICK, NULL, false, -1.0f);
-  float w = (s1.x > s2.x ? s1.x : s2.x) + st->WindowPadding.x * 2.0f;
+  float w = s1.x;
+  if (s2.x > w) w = s2.x;
+  if (s2.x > w) w = s2.x;
+  w += st->WindowPadding.x * 2.0f;
   return w > HUD_HELP_MIN_W ? w : HUD_HELP_MIN_W;
 }
 
@@ -63,6 +74,7 @@ int hud_init(hud* h, void* window, char* err, size_t errcap) {
 
   const float scale = env_f("HUD_FONT_SCALE", HUD_FONT_SCALE);
   const float sw = env_f("HUD_STATS_W", HUD_STATS_W);
+  h->font_scale = scale;
 
   ImGuiStyle* st = igGetStyle();
   igStyleColorsDark(st);
@@ -111,8 +123,12 @@ int hud_init(hud* h, void* window, char* err, size_t errcap) {
   h->margin = HUD_MARGIN;
   h->stats_w = sw;
   h->help_w = hw;
-  printf("hud: imgui %s, font scale %.2f, stats width %s, help %.0f px wide (heights auto-fit)\n",
-         igGetVersion(), scale, sw > 0.0f ? "pinned by HUD_W" : "auto-fit to text", hw);
+  h->info_visible = 1;
+  h->settings_visible = 1;
+  h->settings_placed = 0;
+  h->settings_w = env_f("HUD_SETTINGS_W", HUD_SETTINGS_W);
+  printf("hud: imgui %s, font scale %.2f, stats width %s, help %.0f px wide (heights auto-fit), settings panel %.0f px wide\n",
+         igGetVersion(), scale, sw > 0.0f ? "pinned by HUD_W" : "auto-fit to text", hw, h->settings_w);
   return 0;
 }
 
@@ -152,10 +168,74 @@ static void record_rect(int* rect) {
   rect[3] = (int)(pos.y + size.y);
 }
 
-void hud_frame(hud* h, int w, int h_px, const hud_info* info) {
+/* One widget per settings field. Values are read from the settings struct every frame, so the
+   struct is the source of truth and a widget never holds its own copy. Returns 1 when the
+   widget was released after an edit - the moment a value is worth writing to settings.ini. */
+static int widget_field(settings* s, const set_field* f) {
+  switch (f->type) {
+    case SET_BOOL: {
+      bool v = settings_get(s, f) != 0;
+      if (igCheckbox(f->label, &v)) settings_set(s, f, v ? 1 : 0);
+      break;
+    }
+    case SET_FLOAT: {
+      float v = settings_get(s, f);
+      const char* fmt = f->fmt && *f->fmt ? f->fmt : "%.3f";
+      if (igSliderFloat(f->label, &v, f->min, f->max, fmt, ImGuiSliderFlags_AlwaysClamp))
+        settings_set(s, f, v);
+      break;
+    }
+    case SET_RGB: {
+      float c[3];
+      settings_get_rgb(s, f, c);
+      if (igColorEdit3(f->label, c, ImGuiColorEditFlags_NoAlpha | ImGuiColorEditFlags_Float))
+        settings_set_rgb(s, f, c);
+      break;
+    }
+  }
+  return igIsItemDeactivatedAfterEdit() ? 1 : 0;
+}
+
+/* The settings window: grouped widgets over the field table, no wheel scrolling (the mouse wheel
+   over it must stay a zoom gesture), auto-fit height, pinned width. When the room under the
+   statistics card is smaller than the widget list, ImGui caps the height and shows a scrollbar -
+   the widgets stay reachable, the panel never crosses into the hints. */
+static void draw_settings_window(hud* h, settings* s, float pw, float room) {
+  igSetNextWindowPos((ImVec2){ h->settings_x, h->settings_y }, ImGuiCond_Always,
+                     (ImVec2){ 0.0f, 0.0f });
+  /* Width is pinned by the drag gesture, height fits the widgets but never past the room left
+     under the statistics card: constraining both axes to the same width keeps the panel
+     one-column. Content that does not fit is clipped by the window, not painted over the hints. */
+  if (pw > 0.0f)
+    igSetNextWindowSizeConstraints((ImVec2){ pw, 0.0f }, (ImVec2){ pw, room }, NULL, NULL);
+  if (!igBegin("Settings", NULL,
+               ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
+               ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoSavedSettings))
+    return;
+
+  const char* group = NULL;
+  const size_t nfields = settings_field_count();
+  for (size_t i = 0; i < nfields; i++) {
+    const set_field* f = settings_field(i);
+    if (!group || strcmp(group, f->group) != 0) {
+      if (group) igSeparator();
+      igText("%s", f->group);
+      group = f->group;
+    }
+    if (widget_field(s, f)) h->settings_settled = 1;
+  }
+
+  igSeparator();
+  igTextDisabled("RMB click - hide, drag it - move/resize, P - show again   scrollbar - rows below the fold");
+  record_rect(h->settings_rect);
+  igEnd();
+}
+
+void hud_frame(hud* h, int w, int h_px, const hud_info* info, settings* s) {
   if (!h->ctx) return;
   ImGuiIO* io = igGetIO_Nil();
   h->text_ready = io->FontDefault != NULL && io->Fonts->TexIsBuilt;
+  h->settings_settled = 0;
 
   ImGui_ImplGlfw_NewFrame();
   ImGui_ImplOpenGL3_NewFrame();
@@ -167,7 +247,7 @@ void hud_frame(hud* h, int w, int h_px, const hud_info* info) {
   igNewFrame();
 
   /* Statistics panel: pinned at the top-left corner, width fixed, height = the lines it has. */
-  if (begin_panel("hud_stats", h->margin, h->margin, h->stats_w, 0.0f, 0.0f)) {
+  if (h->info_visible && begin_panel("hud_stats", h->margin, h->margin, h->stats_w, 0.0f, 0.0f)) {
     if (info) {
       char line[256];
       snprintf(line, sizeof line, "%s  fov %.0f deg  dist %.2f  fps %.1f",
@@ -209,17 +289,75 @@ void hud_frame(hud* h, int w, int h_px, const hud_info* info) {
      narrow frame wraps the hints into more lines instead of clipping them (ImGui does not
      wrap by default - PushTextWrapPos(0) wraps at the window's content edge, which works
      because the width here is set by the API). DisplaySize is re-set every frame, so the
-     panel follows window resizes. */
+     panel follows window resizes.
+
+     The lines are also limited by the height that is left above them: the statistics card is
+     drawn first and its bottom edge is known here, so on a small frame the least important
+     hints are dropped rather than painted over the card. hud_hint_lines reports how many are
+     shown, which is what the pixel selftest checks. */
   float avail = (float)w - 2.0f * h->margin;
   float pw = h->help_w < avail ? h->help_w : avail;
   if (pw < 64.0f) pw = 64.0f;
-  if (begin_panel("hud_help", (float)w * 0.5f, (float)h_px - h->margin, pw, 0.5f, 1.0f)) {
+  float room = (float)h_px - 2.0f * h->margin;
+  if (h->info_visible && h->stats_rect[3] > 0) room -= h->stats_rect[3] + h->margin;
+  if (h->info_visible && begin_panel("hud_help", (float)w * 0.5f, (float)h_px - h->margin, pw, 0.5f, 1.0f)) {
+    const ImGuiStyle* st = igGetStyle();
+    const float content_w = pw - 2.0f * st->WindowPadding.x;
+    const float room_inner = room - 2.0f * st->WindowPadding.y;
+    const char* hints[2] = { HUD_HINT_KEYS, HUD_HINT_PICK };
+    float used = 0.0f;
+    int shown = 0;
     igPushTextWrapPos(0.0f);
-    igTextUnformatted(HUD_HINT_KEYS, NULL);
-    igTextUnformatted(HUD_HINT_PICK, NULL);
+    for (int i = 0; i < 2; i++) {
+      /* Conservative height of this hint at the panel width: the unwrapped text width divided by
+         the content width (word wrapping rounds up), times the line height, plus the gap between
+         items. Deliberately pessimistic - underestimating would paint over the statistics card. */
+      ImVec2 sz = igCalcTextSize(hints[i], NULL, false, -1.0f);
+      float lines = content_w > 0.0f && sz.x > content_w ? (float)ceil(sz.x / content_w) : 1.0f;
+      float need = lines * sz.y;
+      if (used + need > room_inner) break;
+      igTextUnformatted(hints[i], NULL);
+      used += need + st->ItemSpacing.y;
+      shown++;
+    }
     igPopTextWrapPos();
+    h->hint_lines = shown;
     record_rect(h->help_rect);
     igEnd();
+  } else {
+    h->hint_lines = 0;
+  }
+
+  /* Settings panel: placed under the statistics card unless the drag gesture moved it. The
+     rect is recorded here so main.c can resolve mouse ownership on the next frame. It is drawn
+     only when there is room between the card and the bottom edge - on a small window the panel
+     would cover the statistics card or the hints, and a panel that overlaps is worse than a
+     panel that is not there. Height is capped to that room so it can never cross the bottom. */
+  if (s && h->settings_visible) {
+    if (!h->settings_placed) {
+      h->settings_x = h->margin;
+      h->settings_y = h->info_visible && h->stats_rect[3] > 0 ? h->stats_rect[3] + h->margin : h->margin;
+    }
+    float bottom = (float)h_px - h->margin;
+    /* The hints are drawn before this panel, so their top edge is known: the gap between the
+     statistics card and the hints is what the settings panel may occupy. The panel is drawn
+     whenever that gap is at least HUD_SETTINGS_MIN_H; a taller widget list gets a scrollbar
+     instead of disappearing (main.c reports the rect and the room each frame). */
+    if (h->info_visible && h->help_rect[3] > h->help_rect[1]) bottom = (float)h->help_rect[1] - h->margin;
+    const float room = bottom - h->settings_y - h->margin;
+    float avail = (float)w - 2.0f * h->margin;
+    float pw = h->settings_w > 0.0f ? (h->settings_w < avail ? h->settings_w : avail) : 0.0f;
+    if (pw > 0.0f && pw < 64.0f) pw = 64.0f;
+    if (pw > 0.0f && room >= HUD_SETTINGS_MIN_H) {
+      draw_settings_window(h, s, pw, room);
+      h->settings_room = room;
+    } else {
+      memset(h->settings_rect, 0, sizeof h->settings_rect);
+      h->settings_room = 0.0f;
+    }
+  } else {
+    memset(h->settings_rect, 0, sizeof h->settings_rect);
+    h->settings_room = 0.0f;
   }
 
   igRender();
@@ -233,7 +371,9 @@ void hud_render(hud* h) {
 
 int hud_rect(const hud* h, int panel, int* x0, int* y0, int* x1, int* y1) {
   if (!h->ctx || h->frames == 0) return 0;
-  const int* r = panel == HUD_PANEL_HELP ? h->help_rect : h->stats_rect;
+  const int* r = panel == HUD_PANEL_HELP ? h->help_rect
+               : panel == HUD_PANEL_SETTINGS ? h->settings_rect
+               : h->stats_rect;
   if (r[2] <= r[0] || r[3] <= r[1]) return 0;
   *x0 = r[0]; *y0 = r[1]; *x1 = r[2]; *y1 = r[3];
   return 1;
@@ -248,4 +388,72 @@ void hud_colors(const hud* h, float bg[4], float text[4]) {
   bg[2] = st->Colors[ImGuiCol_WindowBg].z; bg[3] = st->Colors[ImGuiCol_WindowBg].w;
   text[0] = st->Colors[ImGuiCol_Text].x; text[1] = st->Colors[ImGuiCol_Text].y;
   text[2] = st->Colors[ImGuiCol_Text].z; text[3] = st->Colors[ImGuiCol_Text].w;
+}
+
+void hud_set_info_visible(hud* h, int visible) { h->info_visible = visible ? 1 : 0; }
+int  hud_info_visible(const hud* h) { return h->info_visible; }
+
+void hud_settings_show(hud* h, int visible) {
+  h->settings_visible = visible ? 1 : 0;
+  if (!visible) memset(h->settings_rect, 0, sizeof h->settings_rect);
+}
+int hud_settings_visible(const hud* h) { return h->settings_visible && h->settings_rect[2] > h->settings_rect[0]; }
+int hud_hint_lines(const hud* h) { return h->hint_lines; }
+float hud_settings_room(const hud* h) { return h->settings_room; }
+
+void hud_settings_place(hud* h, float x, float y, float w) {
+  h->settings_placed = 1;
+  h->settings_x = x;
+  h->settings_y = y;
+  if (w > 0.0f) h->settings_w = w;
+}
+
+/* A width restored from settings.ini is already the user's choice: pin it immediately instead
+   of waiting for a drag release. Without this the panel would auto-fit for the first frames. */
+void hud_settings_settle(hud* h) {
+  if (!h->ctx || h->settings_w <= 0.0f) return;
+  h->settings_settled = 1;
+}
+
+/* Apply a width coming from settings.ini. Values flow one way: the drag gesture writes the width
+   into settings, settings writes it into the HUD. Called once after the load - doing it every
+   frame would fight the drag gesture. */
+void hud_set_panel_width(hud* h, float w) {
+  if (!h->ctx || w <= 0.0f) return;
+  h->settings_w = w;
+  h->settings_settled = 1;
+}
+
+/* Re-bake the glyph atlas at a new size. ImGui scales AddFontDefault by FontScaleMain, so the
+   scale is applied to the style first and the fonts are then replaced: with the
+   renderer-has-textures backend the atlas is rebuilt inside the next NewFrame, so no explicit
+   Build() call exists (and none is needed) in this vendored ImGui. */
+int hud_set_font_scale(hud* h, float scale) {
+  if (!h->ctx || scale <= 0.0f) return 0;
+  if (fabsf(scale - h->font_scale) < 0.01f) return 0;
+  ImGuiStyle* st = igGetStyle();
+  st->FontScaleMain = scale;
+  ImGuiIO* io = igGetIO_Nil();
+  ImFontAtlas_ClearFonts(io->Fonts);
+  if (!ImFontAtlas_AddFontDefault(io->Fonts, NULL)) {
+    fprintf(stderr, "hud: font scale %.2f - default font not rebuilt, keeping %.2f\n", scale, h->font_scale);
+    return -1;
+  }
+  h->font_scale = scale;
+  h->text_ready = io->FontDefault != NULL;
+  printf("hud: font scale %.2f (glyph atlas rebuilt on the next frame)\n", scale);
+  return 1;
+}
+
+/* Panel background from settings: the frame colours follow the same base so widgets and the
+   information cards stay one palette. */
+void hud_set_panel_colors(hud* h, const float rgb[3], float alpha) {
+  if (!h->ctx) return;
+  ImGuiStyle* st = igGetStyle();
+  float a = alpha < 0.35f ? 0.35f : (alpha > 1.0f ? 1.0f : alpha);
+  st->Colors[ImGuiCol_WindowBg] = (ImVec4){ rgb[0], rgb[1], rgb[2], a };
+  st->Colors[ImGuiCol_FrameBg] = (ImVec4){
+    rgb[0] * 1.35f + 0.05f, rgb[1] * 1.35f + 0.05f, rgb[2] * 1.35f + 0.05f, a };
+  st->Colors[ImGuiCol_FrameBgHovered] = (ImVec4){
+    rgb[0] * 1.6f + 0.12f, rgb[1] * 1.6f + 0.12f, rgb[2] * 1.6f + 0.12f, a };
 }

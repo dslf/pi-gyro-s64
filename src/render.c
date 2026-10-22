@@ -14,8 +14,13 @@ static const float BASE_COLOR[3]  = { 0.72f, 0.74f, 0.78f };
 static const float BG_COLOR[3]    = { 0.22f, 0.24f, 0.28f };   /* linear */
 static const float HL_COLOR[3]    = { 0.95f, 0.55f, 0.18f };   /* linear, picked-triangle outline */
 
+static float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
 int renderer_init(renderer* r, const char* vert_path, const char* frag_path, char* err, size_t errcap) {
   memset(r, 0, sizeof *r);
+  /* The outline marker is on by default: a regression frame that picks a triangle must see it
+     until settings explicitly turn it off. */
+  r->outline_visible = 1;
 
   if (shader_build(vert_path, frag_path, &r->prog, err, errcap) != 0) return -1;
 
@@ -67,6 +72,62 @@ void renderer_free(renderer* r) {
   if (r && r->hl_vbo) my_glDeleteBuffers(1, &r->hl_vbo);
   if (r && r->hl_vao) my_glDeleteVertexArrays(1, &r->hl_vao);
   memset(r, 0, sizeof *r);
+}
+
+/* Live rendering parameters driven by the settings widgets. Each call uploads uniforms and
+   restores the default program binding, exactly like renderer_init did once at startup. */
+void renderer_set_light(renderer* r, const float dir[3], float intensity) {
+  if (!r || !r->prog) return;
+  float d[3] = { dir[0], dir[1], dir[2] };
+  float len = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+  if (len <= 1e-6f) return;   /* a zero direction would make every normal darken to sky-only */
+  for (int i = 0; i < 3; i++) d[i] /= len;
+  float col[3];
+  for (int i = 0; i < 3; i++) col[i] = LIGHT_COL[i] * intensity;
+  my_glUseProgram(r->prog);
+  my_glUniform3fv(r->uLightDir, 1, d);
+  my_glUniform3fv(r->uLightCol, 1, col);
+  my_glUseProgram(0);
+}
+
+/* The two sky terms are scaled multipliers, so 1.0 keeps the built-in gradient. */
+void renderer_set_sky(renderer* r, float top_mul, float bot_mul) {
+  if (!r || !r->prog) return;
+  float top[3], bot[3];
+  for (int i = 0; i < 3; i++) {
+    top[i] = AMB_TOP[i] * top_mul;
+    bot[i] = AMB_BOT[i] * bot_mul;
+  }
+  my_glUseProgram(r->prog);
+  my_glUniform3fv(r->uAmbTop, 1, top);
+  my_glUniform3fv(r->uAmbBot, 1, bot);
+  my_glUseProgram(0);
+}
+
+void renderer_set_surface(renderer* r, const float rgb[3], float shine, float specular) {
+  if (!r || !r->prog) return;
+  my_glUseProgram(r->prog);
+  my_glUniform3fv(r->uColor, 1, rgb);
+  my_glUniform1f(r->uShine, shine);
+  my_glUniform1f(r->uSpecular, specular);
+  my_glUseProgram(0);
+}
+
+/* Background and outline are stored gamma-encoded: the clear path does not go through the
+   shader's encoding, so the stored value must match what the model pixels end up with. */
+void renderer_set_background(renderer* r, const float rgb[3]) {
+  if (!r) return;
+  for (int i = 0; i < 3; i++) r->bg[i] = powf(clampf(rgb[i], 0.0f, 1.0f), 1.0f / 2.2f);
+}
+
+void renderer_set_outline_color(renderer* r, const float rgb[3]) {
+  if (!r) return;
+  for (int i = 0; i < 3; i++) r->hl_rgb[i] = powf(clampf(rgb[i], 0.0f, 1.0f), 1.0f / 2.2f);
+}
+
+void renderer_set_outline_visible(renderer* r, int visible) {
+  if (!r) return;
+  r->outline_visible = visible ? 1 : 0;
 }
 
 int renderer_highlight(const renderer* r) { return r ? r->hl_tri : -1; }
@@ -124,7 +185,7 @@ void renderer_draw(renderer* r, const gpu_mesh* m, const mat4* vp, const mat4* m
   my_glDrawArrays(wireframe ? GL_LINES : GL_TRIANGLES, 0, m->count);
   my_glBindVertexArray(0);
 
-  if (r->hl_tri >= 0 && r->hl_vao) {
+  if (r->hl_tri >= 0 && r->hl_vao && r->outline_visible) {
     /* Drawn without a depth test so the outline is readable on the surface it
        picked; the outline is a UI marker, not geometry to be occluded. */
     my_glUniform1f(r->uOverride, 1.0f);

@@ -92,6 +92,27 @@ void camera_fov_step(camera* c, float delta_deg) { camera_set_fov(c, c->fov_deg 
 
 void camera_toggle_proj(camera* c) { c->ortho = !c->ortho; }
 
+void camera_set_proj(camera* c, int ortho) { c->ortho = ortho ? 1 : 0; }
+
+void camera_set_orientation(camera* c, float yaw_deg, float pitch_deg) {
+  float yaw = deg2rad(yaw_deg);
+  float pitch = deg2rad(pitch_deg);
+  if (pitch > PITCH_LIMIT) pitch = PITCH_LIMIT;
+  if (pitch < -PITCH_LIMIT) pitch = -PITCH_LIMIT;
+  while (yaw > 6.2832f) yaw -= 6.2832f;
+  while (yaw < -6.2832f) yaw += 6.2832f;
+  c->yaw = yaw;
+  c->pitch = pitch;
+}
+
+void camera_reframe(camera* c, float dist_scale) {
+  if (dist_scale < 0.05f) dist_scale = 0.05f;
+  if (dist_scale > 20.0f) dist_scale = 20.0f;
+  c->dist = frame_dist(c->fit, c->fov_deg) * dist_scale;
+  if (c->dist > DIST_MAX) c->dist = DIST_MAX;
+  if (c->dist < DIST_MIN) c->dist = DIST_MIN;
+}
+
 void camera_orbit(camera* c, float dx, float dy) {
   c->yaw -= dx * 0.005f;
   c->pitch += dy * 0.005f;

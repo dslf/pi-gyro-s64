@@ -2,6 +2,7 @@
 #define VIEWER_HUD_H
 
 #include <stddef.h>
+#include "settings.h"
 
 /* Text overlay built by Dear ImGui (vendored cimgui, C ABI). The viewer stays C11:
    every C++ symbol is hidden behind this header. hud.c owns the ImGui context and the
@@ -9,6 +10,7 @@
 
 #define HUD_PANEL_STATS 0   /* camera / triangles / selection - top-left */
 #define HUD_PANEL_HELP  1   /* hotkey hints - bottom-centre */
+#define HUD_PANEL_SETTINGS 2 /* widgets driving settings - under the stats card, top-left */
 
 typedef struct {
   const char* projection;  /* "persp" | "ortho" */
@@ -38,6 +40,19 @@ typedef struct {
   float help_w;            /* help panel width cap, measured from the hint text; height follows the wrap */
   int stats_rect[4];       /* x0,y0,x1,y1 as ImGui drew it, pixel-y from the top */
   int help_rect[4];        /* same, for the help panel */
+  /* Settings panel: widgets that drive settings. Own rect and lifetime flags, same
+     convention as the info panels - geometry is resolved before the widgets are drawn,
+     so mouse ownership never touches widget state. */
+  int   settings_rect[4];  /* same layout as stats_rect/help_rect */
+  int   settings_visible;
+  int   settings_placed;   /* 0 = the panel is still where hud_frame put it */
+  float settings_x, settings_y;
+  float settings_w;        /* pinned width in px; 0 = auto-fit to the widgets */
+  float settings_room;     /* space left under the statistics card, 0 = no panel this frame */
+  int   hint_lines;        /* hint lines that fit this frame (a small frame drops the tail) */
+  int   settings_settled;  /* a widget was released after an edit -> worth persisting */
+  float font_scale;        /* baked glyph size multiplier */
+  int   info_visible;      /* 0 hides both information panels ([H]) */
 } hud;
 
 /* Initialise ImGui + backends on an existing GLFW window. Returns 0 on success,
@@ -48,7 +63,7 @@ void hud_shutdown(hud* h);
 /* Build both panels for this frame (ImGui NewFrame + widgets). Call before hud_render.
    w/h are the framebuffer size in pixels; both panels are auto-sized to their text and
    re-positioned on every frame (stats top-left, help bottom-centre by pivot). */
-void hud_frame(hud* h, int w, int h_px, const hud_info* info);
+void hud_frame(hud* h, int w, int h_px, const hud_info* info, settings* s);
 
 /* Submit the drawn panels to OpenGL. Does not swap buffers. */
 void hud_render(hud* h);
@@ -56,6 +71,27 @@ void hud_render(hud* h);
 /* Rect of one panel as ImGui drew it (HUD_PANEL_STATS / HUD_PANEL_HELP), in pixels with
    pixel-y from the top. Returns 0 if that panel was not drawn yet. */
 int  hud_rect(const hud* h, int panel, int* x0, int* y0, int* x1, int* y1);
+
+/* Visibility: information panels ([H]) and the settings panel (RMB click). */
+void hud_set_info_visible(hud* h, int visible);
+int  hud_info_visible(const hud* h);
+void hud_settings_show(hud* h, int visible);
+int  hud_settings_visible(const hud* h);
+/* How many hint lines the last frame showed: 2 = all of them, fewer on a small frame. */
+int  hud_hint_lines(const hud* h);
+/* Space left under the statistics card on the last frame; 0 means no room for the panel. */
+float hud_settings_room(const hud* h);
+/* Move the settings panel (window pixels, pixel-y from the top); w <= 0 keeps the current
+   width. The drag gesture in main.c owns the position. */
+void hud_settings_place(hud* h, float x, float y, float w);
+/* Pin the settings panel width now (a width restored from settings.ini). */
+void hud_settings_settle(hud* h);
+/* Same, with an explicit width from settings.ini: called once after settings_load. */
+void hud_set_panel_width(hud* h, float w);
+/* Rebuild the glyph atlas at a new size scale; returns 1 when it was rebuilt. */
+int  hud_set_font_scale(hud* h, float scale);
+/* Panel background colour and opacity (0..1 sRGB floats), driven by settings. */
+void hud_set_panel_colors(hud* h, const float rgb[3], float alpha);
 
 /* Panel background and text colours (0..1 sRGB floats) shared by both panels. */
 void hud_colors(const hud* h, float bg[4], float text[4]);

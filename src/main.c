@@ -8,6 +8,7 @@
 #include "render.h"
 #include "img.h"
 #include "hud.h"
+#include "settings.h"
 
 #include <GLFW/glfw3.h>
 
@@ -48,6 +49,16 @@ typedef struct {
   int hover;          /* triangle under the cursor, -1 for none */
   int locked;         /* triangle pinned by a click, -1 for none */
   char model_path[512];
+  /* Settings: the ini values drive the live app through the module setters, and the widgets
+     read the same struct back, so there is exactly one source of truth. */
+  settings set;
+  int settings_dirty;              /* a hotkey changed settings: worth persisting */
+  int rpress;                      /* right button held: drag the panel or pan the camera */
+  double rpressx, rpressy;
+  int settings_drag;               /* the right drag started over the settings panel */
+  double panel_x, panel_y;         /* panel position at the start of that drag */
+  float ap_fov, ap_dist_scale;     /* framing inputs already pushed to the camera */
+  int ap_ortho;
 } app;
 
 static app* of(GLFWwindow* win) { return glfwGetWindowUserPointer(win); }
@@ -94,16 +105,106 @@ static void on_resize(GLFWwindow* win, int w, int h) {
   a->dirty = 1;
 }
 
+/* Is the cursor over the settings panel? The rect comes from the frame ImGui already drew,
+   so mouse ownership is resolved before any widget is touched (dragging a slider must never
+   orbit the camera, pan, zoom or pin a triangle). */
+static int mouse_in_settings(const app* a, double x, double y) {
+  int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+  if (!hud_rect(&a->hudl, HUD_PANEL_SETTINGS, &x0, &y0, &x1, &y1)) return 0;
+  return x >= (double)x0 && x < (double)x1 && y >= (double)y0 && y < (double)y1;
+}
+
+/* Settings -> live app state, through the module setters only: the panel never reaches into
+   the renderer or the camera directly. Distance is reframed only when a framing input changes,
+   so a wheel zoom survives an orientation slider. */
+static void apply_settings(app* a) {
+  settings* s = &a->set;
+
+  if (a->ap_fov != s->fov_deg) camera_set_fov(&a->cam, s->fov_deg);
+  if (a->ap_ortho != s->ortho) camera_set_proj(&a->cam, s->ortho);
+  if (a->ap_dist_scale != s->dist_scale) camera_reframe(&a->cam, s->dist_scale);
+  a->ap_fov = s->fov_deg;
+  a->ap_ortho = s->ortho;
+  a->ap_dist_scale = s->dist_scale;
+  camera_set_orientation(&a->cam, s->yaw_deg, s->pitch_deg);
+
+  renderer_set_light(&a->rend, s->light_dir, s->light_int);
+  /* Sky visibility is a multiplier, not a shader branch: turning it off leaves the directional
+     light and the surface colour, so the frame is still lit and never black. */
+  if (s->sky_visible) renderer_set_sky(&a->rend, s->amb_top, s->amb_bot);
+  else renderer_set_sky(&a->rend, 0.0f, 0.0f);
+  renderer_set_surface(&a->rend, s->base_rgb, s->shine, s->specular);
+  renderer_set_background(&a->rend, s->bg_rgb);
+  renderer_set_outline_color(&a->rend, s->outline_rgb);
+  renderer_set_outline_visible(&a->rend, s->outline_visible);
+
+  if (a->hudl.ctx) {
+    float bgc[4], txtc[4];
+    hud_colors(&a->hudl, bgc, txtc);
+    hud_set_panel_colors(&a->hudl, bgc, s->hud_bg_alpha);
+    hud_set_font_scale(&a->hudl, s->hud_font_scale);
+    hud_set_info_visible(&a->hudl, s->hud_info_visible);
+    hud_settings_show(&a->hudl, s->hud_settings_visible);
+    hud_set_panel_width(&a->hudl, s->settings_w);
+    a->hudl.help_w = s->hud_help_w;
+    a->hudl.stats_w = s->hud_stats_w;
+  }
+
+  if (a->wireframe != s->wireframe) {
+    a->wireframe = s->wireframe;
+    a->dirty = 1;
+  }
+}
+
+/* The camera moves on its own (orbit, wheel, hotkeys), so its pose is written back into the
+   settings struct: the widgets then show the state the window is really in. Distance stays a
+   framing input - a wheel zoom must not move the distance slider. */
+static void sync_settings_camera(app* a) {
+  settings* s = &a->set;
+  const float yaw = a->cam.yaw * 57.29577951308232f;
+  const float pitch = a->cam.pitch * 57.29577951308232f;
+  if (fabsf(yaw - s->yaw_deg) > 0.05f) { s->yaw_deg = yaw; s->dirty = 1; }
+  if (fabsf(pitch - s->pitch_deg) > 0.05f) { s->pitch_deg = pitch; s->dirty = 1; }
+  if (fabsf(a->cam.fov_deg - s->fov_deg) > 0.05f) { s->fov_deg = a->cam.fov_deg; s->dirty = 1; }
+  if (a->cam.ortho != s->ortho) { s->ortho = a->cam.ortho; s->dirty = 1; }
+}
+
+/* Persist only when something actually changed; a frame that changed nothing writes nothing. */
+static void save_settings(app* a, const char* reason) {
+  if (!settings_dirty(&a->set)) return;
+  char err[160] = "";
+  if (settings_save(&a->set, SETTINGS_FILE, err, sizeof err) != SETTINGS_OK) {
+    fprintf(stderr, "settings: cannot write '%s': %s\n", SETTINGS_FILE, err);
+    return;
+  }
+  printf("settings: saved %zu keys to '%s' (%s)\n", settings_field_count(), SETTINGS_FILE, reason);
+  settings_clear_dirty(&a->set);
+  a->settings_dirty = 0;
+}
+
 static void on_scroll(GLFWwindow* win, double sx, double sy) {
   app* a = of(win);
   (void)sx;
   /* Ctrl+wheel changes the viewing angle instead of the distance: that is what
      makes perspective strong (wide fov, close eye) or flat (narrow fov, far eye). */
+  /* The wheel over the settings panel belongs to the widgets (dragging a slider is not a
+     zoom gesture); everywhere else it stays a zoom or a fov change. */
+  double cx = 0.0, cy = 0.0;
+  glfwGetCursorPos(win, &cx, &cy);
+  if (mouse_in_settings(a, cx, cy)) {
+    a->lastx = cx;
+    a->lasty = cy;
+    a->dirty = 1;
+    return;
+  }
   if (glfwGetKey(win, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
       glfwGetKey(win, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS)
     camera_fov_step(&a->cam, (float)sy * 2.0f);
   else
     camera_zoom(&a->cam, (float)sy);
+  /* Keep the widgets truthful about what the camera just did. */
+  a->set.fov_deg = a->cam.fov_deg;
+  a->set.dirty = 1;
   a->dirty = 1;
 }
 
@@ -143,18 +244,56 @@ static void on_key(GLFWwindow* win, int key, int scancode, int action, int mods)
   if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
 
   if (key == GLFW_KEY_ESCAPE) glfwSetWindowShouldClose(win, 1);
-  else if (key == GLFW_KEY_W) { a->wireframe = !a->wireframe; a->dirty = 1; }
-  else if (key == GLFW_KEY_O) { camera_toggle_proj(&a->cam); a->dirty = 1; }
-  else if (key == GLFW_KEY_LEFT_BRACKET) { camera_fov_step(&a->cam, -5.0f); a->dirty = 1; }
-  else if (key == GLFW_KEY_RIGHT_BRACKET) { camera_fov_step(&a->cam, 5.0f); a->dirty = 1; }
+  else if (key == GLFW_KEY_H) {
+    int vis = !hud_info_visible(&a->hudl);
+    hud_set_info_visible(&a->hudl, vis);
+    a->set.hud_info_visible = vis;
+    a->settings_dirty = 1;
+    printf("hud: information panels %s\n", vis ? "shown" : "hidden");
+    a->dirty = 1;
+  }
+  else if (key == GLFW_KEY_P) {
+    /* The settings panel needs a keyboard route: once it is hidden by RMB its rect is gone,
+       so a mouse click can no longer bring it back. */
+    int vis = !hud_settings_visible(&a->hudl);
+    hud_settings_show(&a->hudl, vis);
+    a->set.hud_settings_visible = vis;
+    a->settings_dirty = 1;
+    printf("settings: panel %s (P)\n", vis ? "shown" : "hidden");
+    a->dirty = 1;
+  }
+  else if (key == GLFW_KEY_W) {
+    a->set.wireframe = !a->set.wireframe;
+    a->settings_dirty = 1;
+    a->dirty = 1;
+  }
+  else if (key == GLFW_KEY_O) {
+    a->set.ortho = !a->set.ortho;
+    a->settings_dirty = 1;
+    a->dirty = 1;
+  }
+  else if (key == GLFW_KEY_LEFT_BRACKET) { camera_fov_step(&a->cam, -5.0f); a->set.fov_deg = a->cam.fov_deg; a->dirty = 1; }
+  else if (key == GLFW_KEY_RIGHT_BRACKET) { camera_fov_step(&a->cam, 5.0f); a->set.fov_deg = a->cam.fov_deg; a->dirty = 1; }
   else if (key == GLFW_KEY_R) {
     /* Reset also releases the pin: a reset frame should not keep an old selection. */
     if (a->locked >= 0) printf("reset: released the pin on triangle %d\n", a->locked);
     a->locked = -1;
     a->hover = -1;
     renderer_set_highlight(&a->rend, &a->cpu, -1);
+    /* Reset writes the settings struct too, so the widgets show the state the window is in. */
     camera_reset(&a->cam, a->mesh.fit);
     apply_camera_req(&a->cam, a);
+    a->set.fov_deg = a->cam.fov_deg;
+    a->set.ortho = a->cam.ortho;
+    a->set.yaw_deg = a->cam.yaw * 57.29577951308232f;
+    a->set.pitch_deg = a->cam.pitch * 57.29577951308232f;
+    a->set.dist_scale = 1.0f;
+    a->set.wireframe = 0;
+    a->set.dirty = 1;
+    a->ap_fov = -1.0f;
+    a->ap_dist_scale = -1.0f;
+    a->ap_ortho = -1;
+    a->settings_dirty = 1;
     a->dirty = 1;
   }
   else if (key == GLFW_KEY_S) snapshot(a, "screenshot.bmp");
@@ -189,6 +328,56 @@ static void handle_mouse(app* a) {
   glfwGetCursorPos(a->win, &lx, &ly);
   int left = glfwGetMouseButton(a->win, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
   int right = glfwGetMouseButton(a->win, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS;
+
+  /* Right button over the settings panel: a drag moves the panel, a short press hides or
+     shows it. Anywhere else the right button stays the pan gesture. */
+  const int over_panel = mouse_in_settings(a, lx, ly);
+  if (right && !a->rpress) {
+    a->rpress = 1;
+    a->rpressx = lx;
+    a->rpressy = ly;
+    int px0 = 0, py0 = 0, px1 = 0, py1 = 0;
+    if (over_panel && hud_rect(&a->hudl, HUD_PANEL_SETTINGS, &px0, &py0, &px1, &py1)) {
+      a->settings_drag = 1;
+      a->panel_x = px0;
+      a->panel_y = py0;
+    }
+  }
+  if (a->settings_drag) {
+    hud_settings_place(&a->hudl, a->panel_x + (lx - a->rpressx),
+                       a->panel_y + (ly - a->rpressy), -1.0f);
+    a->dirty = 1;
+    if (!right) {
+      int px0 = 0, py0 = 0, px1 = 0, py1 = 0;
+      const double moved = fabs(lx - a->rpressx) + fabs(ly - a->rpressy);
+      if (moved < 4.0) {
+        const int vis = !hud_settings_visible(&a->hudl);
+        hud_settings_show(&a->hudl, vis);
+        /* The visibility goes into settings, otherwise a panel hidden here is gone for good on
+           the next start and there is no way back while the rect is not drawn. */
+        a->set.hud_settings_visible = vis;
+        printf("settings: panel %s\n", vis ? "shown" : "hidden");
+        a->settings_dirty = 1;
+      } else if (hud_rect(&a->hudl, HUD_PANEL_SETTINGS, &px0, &py0, &px1, &py1) && px1 > px0) {
+        /* Release over the panel pins the width it ended at: resizing is a panel gesture. */
+        hud_settings_place(&a->hudl, a->panel_x + (lx - a->rpressx),
+                           a->panel_y + (ly - a->rpressy), (float)(px1 - px0));
+        /* The pinned width is a setting: it survives the restart, the position does not. */
+        a->set.settings_w = (float)(px1 - px0);
+        printf("settings: panel moved to (%d, %d) and pinned to %d px wide\n",
+               px0, py0, px1 - px0);
+        a->settings_dirty = 1;
+      }
+      a->rpress = 0;
+      a->settings_drag = 0;
+    }
+    a->lastx = lx;
+    a->lasty = ly;
+    return;
+  }
+  if (!right) a->rpress = 0;
+  /* While the cursor is over the panel its widgets own hover, picking and the wheel. */
+  if (over_panel) { a->lastx = lx; a->lasty = ly; return; }
 
   if (!left && !right) {
     /* A left press that never moved is a pick: it pins the triangle, or unpins
@@ -301,7 +490,7 @@ static void draw_scene(app* a, const framebuffer* fb) {
   if (a->hud_overlay) {
     hud_info info;
     hud_info_fill(a, a->locked >= 0 ? a->locked : a->hover, &info);
-    hud_frame(&a->hudl, w, h, &info);
+    hud_frame(&a->hudl, w, h, &info, a->hud_overlay ? &a->set : NULL);
     hud_render(&a->hudl);
   }
 
@@ -408,9 +597,52 @@ static int run_interactive(app* a, const char* model_path) {
   }
   if (load_model(a, model_path) < 0) return -2;
 
+  /* Settings live next to the binary (settings.ini): defaults first, then the file when it is
+     there. The command line wins over the file, because it is the explicit request. */
+  settings_default(&a->set);
+  char serr[160] = "";
+  int applied = 0, clamped = 0, skipped = 0;
+  int sres = settings_load(&a->set, SETTINGS_FILE, serr, sizeof serr, &applied, &clamped, &skipped);
+  if (sres == SETTINGS_ERROR)
+    fprintf(stderr, "settings: %s - continuing with defaults\n", serr);
+  else if (sres == SETTINGS_MISSING)
+    printf("settings: no '%s' yet - built-in defaults (written on the first change)\n", SETTINGS_FILE);
+  else
+    printf("settings: loaded '%s' - %d keys applied, %d clamped to range, %d ignored\n",
+           SETTINGS_FILE, applied, clamped, skipped);
+  a->ap_fov = -1.0f;
+  a->ap_dist_scale = -1.0f;
+  a->ap_ortho = -1;
+  apply_settings(a);
+  apply_camera_req(&a->cam, a);
+
+  /* The HUD owns its own defaults (HUD_* env included); the widgets start from what it built. */
+  if (a->hudl.ctx) {
+    float bgc[4], txtc[4];
+    hud_colors(&a->hudl, bgc, txtc);
+    a->set.hud_bg_alpha = bgc[3];
+    a->set.hud_font_scale = a->hudl.font_scale;
+    a->set.hud_help_w = a->hudl.help_w;
+    a->set.hud_stats_w = a->hudl.stats_w;
+    a->set.hud_info_visible = a->hudl.info_visible;
+  }
+  sync_settings_camera(a);
+  if (a->fov_given) a->set.fov_deg = a->cam.fov_deg;
+  if (a->ortho_req) a->set.ortho = a->cam.ortho;
+  if (a->yaw_given) a->set.yaw_deg = a->cam.yaw * 57.29577951308232f;
+  if (a->pitch_given) a->set.pitch_deg = a->cam.pitch * 57.29577951308232f;
+  a->ap_fov = a->cam.fov_deg;
+  a->ap_ortho = a->cam.ortho;
+  a->ap_dist_scale = a->set.dist_scale;
+  settings_clear_dirty(&a->set);
+  settings_log(&a->set, "startup");
+
   printf("resize: live repaint - frame size read from the window every frame, redraw from WM_PAINT\n");
   printf("controls: LMB rotate | RMB pan | wheel zoom | Ctrl+wheel fov | [ ] fov | O ortho/perspective\n");
   printf("          W wire | R reset | S screenshot | Tab / Shift+Tab step faces | hover outlines, click pins | Esc quit\n");
+  printf("          H information panels | P settings panel\n");
+  printf("settings: '%s' beside the binary - RMB click over the panel shows/hides it, drag moves it,\n", SETTINGS_FILE);
+  printf("          release over it pins the width; the wheel and picking stay theirs while the cursor is inside\n");
   a->dirty = 1;
   a->hud_overlay = 1; /* the overlay belongs to the interactive window, not to measurement frames */
 
@@ -439,6 +671,14 @@ static int run_interactive(app* a, const char* model_path) {
       win_t = now;
     }
 
+    /* Widgets write into the settings struct inside hud_frame (the previous draw_scene); push
+     those values to the app, then let the camera write its own pose back so the sliders stay
+     truthful about orbit, wheel zoom and hotkeys. Saving happens only on a real change. */
+    if (settings_dirty(&a->set)) apply_settings(a);
+    sync_settings_camera(a);
+    if (a->hudl.settings_settled || a->settings_dirty)
+      save_settings(a, a->hudl.settings_settled ? "widget released" : "hotkey change");
+
     draw_scene(a, NULL);
     if (a->width != a->logged_w || a->height != a->logged_h) {
       printf("resize: %dx%d (repaints during the drag: %llu)\n", a->width, a->height, a->refreshes);
@@ -456,6 +696,7 @@ static int run_interactive(app* a, const char* model_path) {
       break;
     }
   }
+  save_settings(a, "window closing");
   return 0;
 }
 
@@ -932,12 +1173,15 @@ static void measure_panel(const unsigned char* base, const unsigned char* over, 
 
 /* Pixels changed outside both panels: the overlay must not touch anything else. */
 static long outside_panels_diff(const unsigned char* base, const unsigned char* over, int w, int h,
-                                const int* r1, const int* r2, int tol) {
+                                const int* r1, const int* r2, const int* r3, int tol) {
   long n = 0;
   for (int y = 0; y < h; y++)
     for (int x = 0; x < w; x++) {
       if (x >= r1[0] && x < r1[2] && y >= r1[1] && y < r1[3]) continue;
       if (x >= r2[0] && x < r2[2] && y >= r2[1] && y < r2[3]) continue;
+      /* The settings panel added a third rect. An all-zero rect means "not drawn this frame"
+         and skips nothing, so the check stays strict: ink anywhere else is a leak. */
+      if (r3 && x >= r3[0] && x < r3[2] && y >= r3[1] && y < r3[3]) continue;
       const unsigned char* p = base + ((size_t)y * w + x) * 4;
       const unsigned char* q = over + ((size_t)y * w + x) * 4;
       int dr = p[0] - q[0], dg = p[1] - q[1], db = p[2] - q[2];
@@ -1028,6 +1272,9 @@ static void hud_selftest(app* a, int* fails) {
   }
   int stats_rect[4] = { sx0, sy0, sx1, sy1 };
   int help_rect[4] = { hx0, hy0, hx1, hy1 };
+  int settings_rect[4] = { 0, 0, 0, 0 };
+  hud_rect(&a->hudl, HUD_PANEL_SETTINGS, &settings_rect[0], &settings_rect[1],
+           &settings_rect[2], &settings_rect[3]);
   printf("  ok   stats rect %d..%d x %d..%d (%d x %d px)\n", sx0, sx1, sy0, sy1,
          sx1 - sx0, sy1 - sy0);
   printf("  ok   help rect %d..%d x %d..%d (%d x %d px)\n", hx0, hx1, hy0, hy1,
@@ -1239,12 +1486,28 @@ static void hud_selftest(app* a, int* fails) {
     printf("  ok   help ink centroid (%.1f, %.1f) sits bottom-centre\n", hm.cx, hm.cy);
   }
 
-  long outside = outside_panels_diff(px, px2, w, h, stats_rect, help_rect, 8);
-  if (outside != 0) {
-    printf("  FAIL hud ink leaked outside both panel rects: %ld pixels\n", outside);
+  long outside = outside_panels_diff(px, px2, w, h, stats_rect, help_rect, settings_rect, 8);  if (outside != 0) {
+    printf("  FAIL hud ink leaked outside the panel rects: %ld pixels\n", outside);
     (*fails)++;
   } else {
-    printf("  ok   hud ink confined to the two panel rects (0 pixels outside)\n");
+    printf("  ok   hud ink confined to the panel rects (0 pixels outside, settings panel %d x %d)\n",
+           settings_rect[2] - settings_rect[0], settings_rect[3] - settings_rect[1]);
+  }
+
+  /* The three panels must not overlap: a panel painted over another one reads as noise. */
+  long overlap = 0;
+  for (int y = settings_rect[1]; y < settings_rect[3]; y++)
+    for (int x = settings_rect[0]; x < settings_rect[2]; x++) {
+      if (x >= stats_rect[0] && x < stats_rect[2] && y >= stats_rect[1] && y < stats_rect[3]) overlap++;
+      if (x >= help_rect[0] && x < help_rect[2] && y >= help_rect[1] && y < help_rect[3]) overlap++;
+    }
+  if (overlap != 0) {
+    printf("  FAIL settings panel overlaps the info panels by %ld px\n", overlap);
+    (*fails)++;
+  } else {
+    printf("  ok   panels are disjoint: stats %d..%d, settings %d..%d x %d..%d, help from %d\n",
+           stats_rect[1], stats_rect[3], settings_rect[0], settings_rect[2],
+           settings_rect[1], settings_rect[3], help_rect[1]);
   }
 
   /* Stroke structure: glyph strokes are short runs; a solid bar would give long runs. */
@@ -1291,6 +1554,9 @@ static void hud_selftest(app* a, int* fails) {
       } else {
         int nstats[4] = { nsx0, nsy0, nsx1, nsy1 };
         int nhelp[4] = { nhx0, nhy0, nhx1, nhy1 };
+        int nsettings[4] = { 0, 0, 0, 0 };
+        hud_rect(&a->hudl, HUD_PANEL_SETTINGS, &nsettings[0], &nsettings[1],
+                 &nsettings[2], &nsettings[3]);
         printf("  ok   narrow frame %dx%d: stats %d..%d x %d..%d, help %d..%d x %d..%d\n",
                nw, nh, nsx0, nsx1, nsy0, nsy1, nhx0, nhx1, nhy0, nhy1);
         double ncentre = (nhx0 + nhx1) * 0.5;
@@ -1314,7 +1580,23 @@ static void hud_selftest(app* a, int* fails) {
         }
         panel_m nm;
         measure_panel(px, px2, nw, nh, nhelp, bgc, bg_lum, &nm);
-        long nout = outside_panels_diff(px, px2, nw, nh, nstats, nhelp, 8);
+        long nout = outside_panels_diff(px, px2, nw, nh, nstats, nhelp, nsettings, 8);
+        long nover = 0;
+        for (int y = nsettings[1]; y < nsettings[3]; y++)
+          for (int x = nsettings[0]; x < nsettings[2]; x++) {
+            if (x >= nstats[0] && x < nstats[2] && y >= nstats[1] && y < nstats[3]) nover++;
+            if (x >= nhelp[0] && x < nhelp[2] && y >= nhelp[1] && y < nhelp[3]) nover++;
+          }
+        printf("  ok   narrow frame: hints %d of 2 fit, settings panel %d x %d, overlap %ld px\n",
+               hud_hint_lines(&a->hudl), nsettings[2] - nsettings[0], nsettings[3] - nsettings[1], nover);
+        if (nover != 0) {
+          printf("  FAIL settings panel overlaps the info panels by %ld px on a narrow frame\n", nover);
+          (*fails)++;
+        }
+        if (hud_hint_lines(&a->hudl) < 1) {
+          printf("  FAIL no hint lines fit on the narrow frame - the help panel is empty\n");
+          (*fails)++;
+        }
         printf("  ok   narrow help ink %ld px of %d x %d, coverage %.2f%%, contrast %.2f:1\n",
                nm.ink_n, nhx1 - nhx0, nhy1 - nhy0, nm.coverage, nm.contrast);
         if (nm.coverage > 45.0) {
@@ -1343,13 +1625,18 @@ static void hud_selftest(app* a, int* fails) {
         printf("  ok   narrow help hugs its text: gaps L %d R %d T %d B %d px\n",
                ngap[0], ngap[1], ngap[2], ngap[3]);
         if (nout != 0) {
-          printf("  FAIL hud ink leaked outside both panel rects on a narrow frame: %ld px\n", nout);
+          printf("  FAIL hud ink leaked outside the panel rects on a narrow frame: %ld px\n", nout);
           (*fails)++;
         }
-        /* Wrapping proof: the narrow panel is taller than the wide one and narrower. */
-        if ((nhx1 - nhx0) < (hx1 - hx0) && (nhy1 - nhy0) > (hy1 - hy0)) {
-          printf("  ok   hints wrap: %d x %d -> %d x %d px (narrower, taller)\n",
-                 hx1 - hx0, hy1 - hy0, nhx1 - nhx0, nhy1 - nhy0);
+        /* Wrapping proof: on a frame tall enough for everything the narrow panel is taller and
+           narrower. When it is not, hud drops the tail hint rather than painting over the
+           statistics card - the card is the more valuable panel - and then the narrow panel is
+           shorter. hud_hint_lines says which case happened, so neither is faked. */
+        int hints_all = hud_hint_lines(&a->hudl) >= 2;
+        if ((nhx1 - nhx0) < (hx1 - hx0) && ((nhy1 - nhy0) > (hy1 - hy0) || !hints_all)) {
+          printf("  ok   hints %s: %d x %d -> %d x %d px (narrower, %s)\n",
+                 hints_all ? "wrap" : "drop", hx1 - hx0, hy1 - hy0, nhx1 - nhx0, nhy1 - nhy0,
+                 hints_all ? "taller" : "shorter, tail hint omitted to keep the card clear");
         } else {
           printf("  FAIL narrow help %d x %d did not wrap from %d x %d\n",
                  nhx1 - nhx0, nhy1 - nhy0, hx1 - hx0, hy1 - hy0);
@@ -1362,6 +1649,300 @@ static void hud_selftest(app* a, int* fails) {
 
   a->hover = orig_hover;
   a->locked = orig_locked;
+  fb_free(&fb);
+}
+
+/* Settings: the ini is the contract between the widgets and the app, so it is checked without
+   a mouse - keys, ranges, roundtrip, and the panel pixels the ini produces. */
+static void settings_selftest(app* a, int* fails) {
+  printf("selftest: settings.ini (keys, clamps, roundtrip) and the widget panel\n");
+  char err[256] = "";
+  const size_t nf = settings_field_count();
+  if (nf < 20) {
+    printf("  FAIL settings has only %zu fields - the widget table is incomplete\n", nf);
+    (*fails)++;
+  }
+
+  settings d;
+  settings_default(&d);
+  int defaults_ok = d.fov_deg == 60.0f && d.hud_settings_visible == 1 && d.sky_visible == 1 &&
+                    d.outline_visible == 1 && d.settings_w == 460.0f && d.hud_bg_alpha == 0.94f &&
+                    !settings_dirty(&d);
+  printf("  %s defaults: fov %.0f, panel %d px wide, shown %d, sky %d, outline %d\n",
+         defaults_ok ? "ok  " : "FAIL", d.fov_deg, (int)d.settings_w, d.hud_settings_visible,
+         d.sky_visible, d.outline_visible);
+  if (!defaults_ok) (*fails)++;
+
+  /* Roundtrip over every key: save then read back into a fresh struct. */
+  settings s;
+  settings_default(&s);
+  s.fov_deg = 30.0f; s.dist_scale = 2.5f; s.wireframe = 1; s.settings_w = 450.0f;
+  s.hud_settings_visible = 0; s.sky_visible = 0; s.outline_visible = 0;
+  s.bg_rgb[0] = 0.11f; s.bg_rgb[1] = 0.22f; s.bg_rgb[2] = 0.33f;
+  int saved = settings_save(&s, "build/settings_selftest.ini", err, sizeof err);
+  if (saved != SETTINGS_OK) {
+    printf("  FAIL settings save: %s\n", err);
+    (*fails)++;
+  } else {
+    int applied = 0, clamped = 0, skipped = 0;
+    settings r;
+    int rc = settings_load(&r, "build/settings_selftest.ini", err, sizeof err,
+                           &applied, &clamped, &skipped);
+    int fields_ok = rc == SETTINGS_OK && applied == (int)nf && clamped == 0 && skipped == 0;
+    for (size_t i = 0; i < nf && fields_ok; i++) {
+      const set_field* f = settings_field(i);
+      float got = settings_get(&r, f);
+      float want = settings_get(&s, f);
+      if (f->type == SET_RGB) {
+        float c[3], w3[3];
+        settings_get_rgb(&r, f, c);
+        settings_get_rgb(&s, f, w3);
+        for (int k = 0; k < 3; k++)
+          if (fabsf(c[k] - w3[k]) > 1e-4f) { fields_ok = 0; break; }
+      } else if (fabsf(got - want) > 1e-4f) fields_ok = 0;
+    }
+    printf("  %s roundtrip: %d keys applied, %d clamped, %d ignored, values match\n",
+           fields_ok ? "ok  " : "FAIL", applied, clamped, skipped);
+    if (!fields_ok) (*fails)++;
+    if (settings_dirty(&r)) {
+      printf("  FAIL settings_load left the struct dirty - a read must not count as a change\n");
+      (*fails)++;
+    }
+  }
+
+  /* A damaged file: unknown key, a line without '=', a bool that is not a bool, a value out of
+   range. Every one of them must be reported and must not poison the defaults. */
+  FILE* fp = fopen("build/settings_selftest_bad.ini", "w");
+  if (!fp) {
+    printf("  FAIL cannot write build/settings_selftest_bad.ini\n");
+    (*fails)++;
+  } else {
+    fprintf(fp, "# comment\nfov_deg = 200\nno_equals_here\nbogus_key = 1\northo = maybe\n");
+    fprintf(fp, "settings_w = 40\nlight_dir = 0.5 0.5 0.5\n");
+    fclose(fp);
+    settings b;
+    int applied = 0, clamped = 0, skipped = 0;
+    int rc = settings_load(&b, "build/settings_selftest_bad.ini", err, sizeof err,
+                           &applied, &clamped, &skipped);
+    const int expect = 3, expect_clamp = 2, expect_skip = 3;
+    const int ok = rc == SETTINGS_OK && applied == expect && clamped == expect_clamp &&
+                   skipped == expect_skip && b.fov_deg == 90.0f && b.settings_w == 120.0f &&
+                   b.ortho == 0 && b.amb_top == 1.0f;
+    printf("  %s damaged file: %d applied (want %d), %d clamped (want %d), %d ignored (want %d), "
+           "fov %.0f, panel %.0f px\n", ok ? "ok  " : "FAIL", applied, expect, clamped, expect_clamp,
+           skipped, expect_skip, b.fov_deg, b.settings_w);
+    if (!ok) (*fails)++;
+  }
+
+  /* A file that is not there is not an error: defaults survive. */
+  settings m;
+  int applied = 0, clamped = 0, skipped = 0;
+  int rc = settings_load(&m, "build/settings_does_not_exist.ini", err, sizeof err,
+                         &applied, &clamped, &skipped);
+  const int missing_ok = rc == SETTINGS_MISSING && applied == 0 && m.fov_deg == 60.0f;
+  printf("  %s missing file: rc %d, defaults kept\n", missing_ok ? "ok  " : "FAIL", rc);
+  if (!missing_ok) (*fails)++;
+
+  /* The panel itself: drawn, gated, and sized by the ini. An enum, not const int, so the
+     readback buffers can be static. */
+  enum { PW = 1280, PH = 900 };   /* tall enough that the widget panel fits between the card and the hints */
+  framebuffer fb;
+  if (fb_create(&fb, PW, PH, err, sizeof err) != 0) {
+    printf("  FAIL settings framebuffer: %s\n", err);
+    (*fails)++;
+    return;
+  }
+  static unsigned char pxv[PW * PH * 4];
+  static unsigned char pxh[PW * PH * 4];
+  static unsigned char pxbase[PW * PH * 4];
+  settings_default(&a->set);
+  apply_settings(a);
+  camera_reset(&a->cam, a->mesh.fit);
+  a->hud_overlay = 0;
+  draw_scene(a, &fb);              /* the scene with no HUD: the baseline for pixel diffs */
+  a->hud_overlay = 1;
+  draw_scene(a, &fb);
+  draw_scene(a, &fb);
+  draw_scene(a, &fb);
+  int rx0 = 0, ry0 = 0, rx1 = 0, ry1 = 0;
+  const int rect_ok = hud_rect(&a->hudl, HUD_PANEL_SETTINGS, &rx0, &ry0, &rx1, &ry1) && rx1 > rx0;
+  if (!rect_ok) {
+    printf("  FAIL settings panel rect unknown - ImGui drew nothing\n");
+    (*fails)++;
+    fb_free(&fb);
+    return;
+  }
+  const int pinned = (rx1 - rx0) == (int)a->set.settings_w;
+  printf("  %s panel drawn at (%d, %d) %d px wide, ini asks for %.0f px\n",
+         pinned ? "ok  " : "FAIL", rx0, ry0, rx1 - rx0, a->set.settings_w);
+  if (!pinned) (*fails)++;
+
+  /* The widget panel must not sit on top of the info panels: rect overlap in pixels is the
+     numeric version of "the three panels are disjoint". */
+  int px0, py0, px1, py1, qx0, qy0, qx1, qy1;
+  hud_rect(&a->hudl, HUD_PANEL_STATS, &px0, &py0, &px1, &py1);
+  hud_rect(&a->hudl, HUD_PANEL_HELP, &qx0, &qy0, &qx1, &qy1);
+  long pover = 0, qover = 0;
+  if (px1 > px0 && py1 > py0 && rx1 > rx0 && ry1 > ry0) {
+    const int ox = rx1 < px1 ? rx1 - px0 : px1 - rx0;
+    const int oy = ry1 < py1 ? ry1 - py0 : py1 - ry0;
+    if (ox > 0 && oy > 0) pover = (long)ox * oy;
+  }
+  if (qx1 > qx0 && qy1 > qy0 && rx1 > rx0 && ry1 > ry0) {
+    const int ox = rx1 < qx1 ? rx1 - qx0 : qx1 - rx0;
+    const int oy = ry1 < qy1 ? ry1 - qy0 : qy1 - ry0;
+    if (ox > 0 && oy > 0) qover = (long)ox * oy;
+  }
+  if (pover != 0 || qover != 0) {
+    printf("  FAIL the widget panel overlaps the info panels: stats by %ld px, hints by %ld px\n",
+           pover, qover);
+    (*fails)++;
+  } else {
+    printf("  ok   panels are disjoint: stats %d..%d x %d..%d, settings %d..%d x %d..%d, "
+           "hints %d..%d x %d..%d, overlap 0 px\n",
+           px0, px1, py0, py1, rx0, rx1, ry0, ry1, qx0, qx1, qy0, qy1);
+  }
+  if (fb_read_rgba(&fb, pxv, err, sizeof err) != 0) {
+    printf("  FAIL settings readback: %s\n", err);
+    (*fails)++;
+    fb_free(&fb);
+    return;
+  }
+
+  /* Pixels of the panel: ink inside its rect, contrast against the panel background, and no ink
+     anywhere else in the frame. Thresholds are relative so another GPU/AA survives them. */
+  a->hud_overlay = 0;
+  draw_scene(a, &fb);
+  if (fb_read_rgba(&fb, pxbase, err, sizeof err) != 0) {
+    printf("  FAIL settings baseline readback: %s\n", err);
+    (*fails)++;
+    a->hud_overlay = 1;
+    fb_free(&fb);
+    return;
+  }
+  a->hud_overlay = 1;
+  float bgc[4], txtc[4];
+  hud_colors(&a->hudl, bgc, txtc);
+  const double bg_lum = lum3((unsigned)(bgc[0] * 255.0f), (unsigned)(bgc[1] * 255.0f),
+                             (unsigned)(bgc[2] * 255.0f));
+  const int srect[4] = { rx0, ry0, rx1, ry1 };
+  panel_m pm;
+  measure_panel(pxbase, pxv, PW, PH, srect, bgc, bg_lum, &pm);
+  /* Text glyphs are the bright ink; widget chrome (frames, grabbers) sits mid-tone and must not
+     be counted as text, or the contrast of the labels would read as too low. Thresholds are
+     relative to the palette the HUD asked for. */
+  const double txt_lum = lum3((unsigned)(txtc[0] * 255.0f), (unsigned)(txtc[1] * 255.0f),
+                              (unsigned)(txtc[2] * 255.0f));
+  long glyph = 0, chrome = 0, plain = 0;
+  double gsum = 0.0, csum = 0.0, psum = 0.0;
+  int gx0 = srect[2], gx1 = srect[0], gy0 = srect[3], gy1 = srect[1];
+  for (int y = srect[1]; y < srect[3]; y++)
+    for (int x = srect[0]; x < srect[2]; x++) {
+      const unsigned char* p = pxbase + ((size_t)y * PW + x) * 4;
+      const unsigned char* q = pxv + ((size_t)y * PW + x) * 4;
+      const double scene = lum3(p[2], p[1], p[0]);
+      const double panel_ref = bgc[3] * bg_lum + (1.0 - bgc[3]) * scene;
+      const double l = lum3(q[2], q[1], q[0]);
+      if (l > panel_ref + 0.60 * txt_lum) { glyph++; gsum += l; if (x < gx0) gx0 = x; if (x > gx1) gx1 = x; if (y < gy0) gy0 = y; if (y > gy1) gy1 = y; }
+      else if (l > panel_ref + 25.0) { chrome++; csum += l; }
+      else { plain++; psum += l; }
+    }
+  const double glyph_lum = glyph ? gsum / (double)glyph : 0.0;
+  const double panel_lum = plain ? psum / (double)plain : 0.0;
+  const double gcontrast = wcag_ratio(glyph_lum, panel_lum);
+  const double area = (double)(rx1 - rx0) * (double)(ry1 - ry0);
+  const double gcov = area > 0 ? 100.0 * (double)glyph / area : 0.0;
+  const int ink_ok = glyph > 400 && gcov > 0.5 && gcontrast >= 4.5 &&
+                     gx0 >= rx0 && gx1 < rx1 && gy0 >= ry0 && gy1 < ry1 &&
+                     (double)(gy1 - gy0) >= 0.5 * (double)(ry1 - ry0);
+  printf("  %s settings glyph ink %ld px of %d x %d (%.2f%%), chrome %ld px (%.2f%%, lum %.1f), "
+         "contrast %.2f:1 (>= 4.5:1), ink box %d..%d x %d..%d covers %.0f%% of the panel height\n",
+         ink_ok ? "ok  " : "FAIL", glyph, rx1 - rx0, ry1 - ry0, gcov, chrome,
+         100.0 * (double)chrome / area, csum / (double)(chrome ? chrome : 1), gcontrast,
+         gx0, gx1, gy0, gy1, 100.0 * (double)(gy1 - gy0) / (double)(ry1 - ry0));
+  if (!ink_ok) (*fails)++;
+
+  int st[4] = { 0, 0, 0, 0 }, hp[4] = { 0, 0, 0, 0 };
+  hud_rect(&a->hudl, HUD_PANEL_STATS, &st[0], &st[1], &st[2], &st[3]);
+  hud_rect(&a->hudl, HUD_PANEL_HELP, &hp[0], &hp[1], &hp[2], &hp[3]);
+  const long leak = outside_panels_diff(pxbase, pxv, PW, PH, st, hp, srect, 8);
+  printf("  %s hud ink confined to the three panel rects (%ld pixels outside)\n",
+         leak == 0 ? "ok  " : "FAIL", leak);
+  if (leak != 0) (*fails)++;
+
+  const float room = hud_settings_room(&a->hudl);
+  const int fits = (ry1 - ry0) <= (int)(room + 2.0f);
+  printf("  %s panel fits the room under the card: rect %d px tall, room %.0f px (no scroll, no clip)\n",
+         fits ? "ok  " : "FAIL", ry1 - ry0, room);
+  if (!fits) (*fails)++;
+
+  /* The panel inside the interactive window size the viewer opens with (800 x 600): it must be
+     present and bounded by the room, so a taller widget list scrolls inside the panel instead of
+     reaching past the hints. */
+  framebuffer mid;
+  memset(&mid, 0, sizeof mid);
+  if (fb_create(&mid, 800, 600, err, sizeof err) != 0) {
+    printf("  FAIL 800x600 frame: %s\n", err);
+    (*fails)++;
+  } else {
+    draw_scene(a, &mid);
+    int mx0 = 0, my0 = 0, mx1 = 0, my1 = 0;
+    if (!hud_rect(&a->hudl, HUD_PANEL_SETTINGS, &mx0, &my0, &mx1, &my1) || mx1 <= mx0) {
+      printf("  FAIL the widget panel is missing at the default window size 800 x 600\n");
+      (*fails)++;
+    } else {
+      const float mroom = hud_settings_room(&a->hudl);
+      const int bounded = (my1 - my0) <= (int)(mroom + 2.0f) && my1 <= 600 && mx1 <= 800;
+      printf("  %s panel at the default window 800 x 600: rect %d x %d px inside room %.0f px "
+             "(rows below the fold reached by the scrollbar, hints stay clear)\n",
+             bounded ? "ok  " : "FAIL", mx1 - mx0, my1 - my0, mroom);
+      if (!bounded) (*fails)++;
+    }
+    fb_free(&mid);
+  }
+
+  /* Dump the HUD frame so the layout can be looked at, not only measured. */
+  if (img_write_bmp("build/settings_panel.bmp", PW, PH, pxv, err, sizeof err) != 0) {
+    printf("  FAIL settings panel dump: %s\n", err);
+    (*fails)++;
+  } else {
+    printf("  ok   hud frame dumped to build/settings_panel.bmp (%d x %d, scene = %d triangles)\n",
+           PW, PH, a->cpu.triangles);
+  }
+
+  /* Mouse ownership: inside the panel the widgets own the cursor, outside they do not. */
+  const int inside = mouse_in_settings(a, (rx0 + rx1) / 2.0, (ry0 + ry1) / 2.0);
+  const int outside = mouse_in_settings(a, PW - 2.0, PH - 2.0);
+  const int gate_ok = inside == 1 && outside == 0;
+  printf("  %s mouse gate: inside %d, outside %d\n", gate_ok ? "ok  " : "FAIL", inside, outside);
+  if (!gate_ok) (*fails)++;
+
+  /* Hide it through the ini value and re-render: the panel area must become bare background. */
+  a->set.hud_settings_visible = 0;
+  apply_settings(a);
+  draw_scene(a, &fb);
+  draw_scene(a, &fb);
+  if (fb_read_rgba(&fb, pxh, err, sizeof err) != 0) {
+    printf("  FAIL hidden settings readback: %s\n", err);
+    (*fails)++;
+  } else {
+    long changed = 0;
+    for (int y = ry0; y < ry1; y++)
+      for (int x = rx0; x < rx1; x++) {
+        const int i = (y * PW + x) * 4;
+        if (abs((int)pxv[i] - (int)pxh[i]) > 8 || abs((int)pxv[i + 1] - (int)pxh[i + 1]) > 8 ||
+            abs((int)pxv[i + 2] - (int)pxh[i + 2]) > 8) changed++;
+      }
+    const double frac = (double)changed / (double)((rx1 - rx0) * (ry1 - ry0));
+    const int content_ok = changed > 200 && frac > 0.20 && !hud_rect(&a->hudl, HUD_PANEL_SETTINGS, &rx0, &ry0, &rx1, &ry1);
+    printf("  %s hidden panel: %ld px of content in the old rect (%.1f%%), rect no longer reported\n",
+           content_ok ? "ok  " : "FAIL", changed, frac * 100.0);
+    if (!content_ok) (*fails)++;
+  }
+  a->set.hud_settings_visible = 1;
+  apply_settings(a);
+  a->hud_overlay = 0;
+  settings_clear_dirty(&a->set);
   fb_free(&fb);
 }
 
@@ -1705,6 +2286,26 @@ static int run_selftest(app* a) {
             printf("  %s picked outline: %d px drawn, %d px after clearing\n",
                    outline_ok ? "ok  " : "FAIL", hl_px, no_hl_px);
             if (!outline_ok) fails++;
+
+            /* outline_visible=false hides the marker but keeps the pin: the selection must stay
+               alive while nothing of it is drawn. */
+            renderer_set_highlight(&a->rend, &m, 0);
+            renderer_set_outline_visible(&a->rend, 0);
+            draw_scene(a, &fb);
+            int off_px = 0;
+            if (fb_read_rgba(&fb, px, err, sizeof err) == 0) {
+              const int er = (int)(a->rend.hl_rgb[0] * 255.0f + 0.5f);
+              const int eg = (int)(a->rend.hl_rgb[1] * 255.0f + 0.5f);
+              const int eb = (int)(a->rend.hl_rgb[2] * 255.0f + 0.5f);
+              for (int i = 0; i < 128 * 128; i++)
+                if (abs((int)px[i * 4] - er) <= 20 && abs((int)px[i * 4 + 1] - eg) <= 20 &&
+                    abs((int)px[i * 4 + 2] - eb) <= 20) off_px++;
+            }
+            const int hidden_ok = off_px == 0 && renderer_highlight(&a->rend) == 0;
+            printf("  %s outline hidden: %d marker px while triangle %d stays pinned\n",
+                   hidden_ok ? "ok  " : "FAIL", off_px, renderer_highlight(&a->rend));
+            if (!hidden_ok) fails++;
+            renderer_set_outline_visible(&a->rend, 1);
           }
         } else {
           printf("  FAIL read pixels: %s\n", err);
@@ -1726,6 +2327,7 @@ static int run_selftest(app* a) {
   orbit_drag_selftest(&fails);
   mouse_pick_selftest(&fails);
   hud_selftest(a, &fails);
+  settings_selftest(a, &fails);
   resize_selftest(a, &fails);
 
   printf("selftest: %s\n", fails == 0 ? "PASS" : "FAILED");

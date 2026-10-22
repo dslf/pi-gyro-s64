@@ -4,8 +4,8 @@ IMGUI   = deps/imgui/build/libcimgui.a
 LDFLAGS = -lglfw3 -lopengl32 -lgdi32 -lwinmm -lstdc++ -static-libgcc -static-libstdc++
 
 SRC = src/main.c src/gl.c src/vmath.c src/camera.c src/obj.c src/mesh.c \
-      src/shader.c src/render.c src/img.c src/hud.c
-HDR = src/gl.h src/vmath.h src/obj.h src/mesh.h src/camera.h src/render.h src/img.h src/hud.h
+      src/shader.c src/render.c src/img.c src/hud.c src/settings.c
+HDR = src/gl.h src/vmath.h src/obj.h src/mesh.h src/camera.h src/render.h src/img.h src/hud.h src/settings.h
 SH  = shaders/model.vert shaders/model.frag
 
 # Owner decision (PROJECT_MEMORY.md §4.20): the product binary lives at the repo root, so
