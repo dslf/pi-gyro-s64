@@ -46,6 +46,8 @@ int img_write_bmp(const char* path, int w, int h, const unsigned char* rgba, cha
   unsigned char* row = malloc((size_t)rowbytes);
   if (!row) { fclose(f); snprintf(err, errcap, "out of memory"); return -1; }
 
+  /* `rgba` is top-down, so walking y from h-1 down to 0 emits the image bottom first, which is
+     what a bottom-up DIB expects. Writing y = 0 first would flip the saved image vertically. */
   for (int y = h - 1; y >= 0; y--) {
     const unsigned char* src = rgba + (size_t)y * (size_t)w * 4;
     for (int x = 0; x < w; x++) {
@@ -65,7 +67,7 @@ int img_write_bmp(const char* path, int w, int h, const unsigned char* rgba, cha
 
 double img_changed_fraction(const unsigned char* rgba, int w, int h, int tol) {
   if (w <= 0 || h <= 0 || !rgba) return 0.0;
-  const unsigned char* base = rgba;
+  const unsigned char* base = rgba;   /* top-left pixel under the top-down contract */
   int changed = 0;
   for (int i = 0; i < w * h; i++) {
     int dr = (int)rgba[i * 4 + 0] - (int)base[0];

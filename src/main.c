@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define VERT_SHADER "shaders/model.vert"
 #define FRAG_SHADER "shaders/model.frag"
@@ -605,6 +606,81 @@ static void mouse_pick_selftest(int* fails) {
   obj_mesh_free(&m);
 }
 
+/* Saved images must be upright: img_write_bmp takes rows top-down and writes a bottom-up DIB,
+   so the first pixel row in the file is the image bottom. Pin that with known colors - a flip
+   anywhere in the chain (readback, writer, atlas) would land HUD text at the wrong end. */
+static void expect_bmp_orientation(int* fails) {
+  const int w = 4, h = 3;
+  const unsigned char want[3][3] = { {255, 0, 0}, {0, 255, 0}, {0, 0, 255} };  /* top, middle, bottom */
+  unsigned char px[w * h * 4];
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++) {
+      unsigned char* p = px + (size_t)(y * w + x) * 4u;
+      p[0] = want[y][0]; p[1] = want[y][1]; p[2] = want[y][2]; p[3] = 255;
+    }
+
+  mkdir("tests/out");                     /* suite output dir; harmless if it already exists */
+  const char* path = "tests/out/selftest_bmp.bmp";
+  char err[256] = "";
+  if (img_write_bmp(path, w, h, px, err, sizeof err) != 0) {
+    printf("  FAIL bmp write: %s\n", err);
+    (*fails)++;
+    return;
+  }
+
+  const int rowbytes = (w * 3 + 3) & ~3;
+  unsigned char hdr[54];
+  unsigned char rows[3][12];
+  FILE* f = fopen(path, "rb");
+  if (!f) {
+    printf("  FAIL cannot read back '%s'\n", path);
+    (*fails)++;
+    return;
+  }
+  size_t hdr_got = fread(hdr, 1, sizeof hdr, f);
+  size_t rows_got = fread(rows, 1, sizeof rows, f);
+  fclose(f);
+  remove(path);
+
+  if (hdr_got != sizeof hdr || rows_got != sizeof rows) {
+    printf("  FAIL '%s' is short: %zu header bytes, %zu pixel bytes\n", path, hdr_got, rows_got);
+    (*fails)++;
+    return;
+  }
+
+  const int fh = (int)(hdr[22] | (hdr[23] << 8) | (hdr[24] << 16) | (hdr[25] << 24));
+  const int bpp = hdr[28] | (hdr[29] << 8);
+  printf("  header: %c%c %dx%d bpp=%d rowbytes=%d height_sign=%s\n",
+         hdr[0], hdr[1], w, fh, bpp, rowbytes, fh >= 0 ? "bottom-up" : "top-down");
+
+  /* BMP pixel bytes are B,G,R. File row fr holds image row h-1-fr, so file row 0 = bottom = blue. */
+  int mismatch = 0;
+  int first_x = -1, first_fr = -1;
+  int got_r = 0, got_g = 0, got_b = 0;
+  for (int fr = 0; fr < h; fr++) {
+    const unsigned char* src = want[h - 1 - fr];
+    for (int x = 0; x < w; x++) {
+      const unsigned char* p = rows[fr] + (size_t)x * 3u;
+      if (p[0] != src[2] || p[1] != src[1] || p[2] != src[0]) {
+        if (mismatch == 0) { first_fr = fr; first_x = x; got_r = p[2]; got_g = p[1]; got_b = p[0]; }
+        mismatch++;
+      }
+    }
+  }
+
+  int ok = mismatch == 0 && fh == h && bpp == 24 && hdr[0] == 'B' && hdr[1] == 'M';
+  if (ok) {
+    printf("  ok  upright: file row 0 = bottom rgb %d,%d,%d, row %d = top rgb %d,%d,%d\n",
+           rows[0][2], rows[0][1], rows[0][0], h - 1, rows[h - 1][2], rows[h - 1][1], rows[h - 1][0]);
+  } else {
+    printf("  FAIL bmp orientation: %d mismatched pixels, first at file row %d x %d = rgb %d,%d,%d "
+           "(expected bottom rgb %d,%d,%d), header %dx%d bpp=%d\n",
+           mismatch, first_fr, first_x, got_r, got_g, got_b,
+           want[h - 1][0], want[h - 1][1], want[h - 1][2], w, fh, bpp);
+    (*fails)++;
+  }
+}
+
 static int run_selftest(app* a) {
   int fails = 0;
   printf("selftest: OBJ parser\n");
@@ -615,6 +691,9 @@ static int run_selftest(app* a) {
   expect_parse_failure("assets/bad.obj", &fails);
   expect_parse_failure("assets/bad_index.obj", &fails);
   expect_mesh("utah_teapot.obj", 1250, OBJ_HAS_NORMALS | OBJ_HAS_TEXCOORDS, &fails);
+
+  printf("selftest: BMP orientation\n");
+  expect_bmp_orientation(&fails);
 
   printf("selftest: shader + offscreen pixels\n");
   char err[256] = "";

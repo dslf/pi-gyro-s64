@@ -23,6 +23,9 @@
 | OpenGL | `lib/libopengl32.a`; версия выводится: `3.3.0 NVIDIA 616.92` |
 | GPU | NVIDIA RTX 4070 Ti (основная), AMD iGPU резерв |
 | Python | есть, используется для проверки BMP (`tests/check_images.py`) |
+| BMP на диске | байты файла — **BGR**, строки файла снизу вверх (bottom-up DIB). Байты в памяти (`fb_read_rgba`) — RGBA, строка 0 = **верх** кадра |
+| GDI (текст) | `user32gdi32` доступен через `windows.h`: `CreateCompatibleDC`, `CreateCompatibleBitmap`, `TextOutW`, `GetPixel` — работает headless (проверено зондом `trash/probes/probe_hud.c`) |
+| Зонды вне продукного пути | в зонде с `GLFW_VISIBLE=false` (рендер в back buffer) readback даёт чёрный кадр — нужен FBO; `glGetInteger(GL_*_BINDING)` читает нули, а после `glUseProgram` появляется `0x500` (`GL_INVALID_ENUM`). Указатели GL совпадают с `glfwGetProcAddress`, но такая диагностика зонда **ненадёжна**; продукный путь (`--render` / `--selftest` через FBO) подтверждён пикселями |
 | Инструменты | `make`, `cmake`, `ninja`; нет clang/cl/vcpkg/glad/cglm/stb |
 | Git | **репозиторий создан** (`git init`, identity `pi-agent`/`agent@local`); remote отсутствует; `.gitignore` + `.gitattributes` (`* text=auto eol=lf`) |
 | pi | окружение pi.dev; session-recall через `@sting8k/pi-vcc` (package.json — только tooling, не приложение) |
@@ -39,10 +42,13 @@
 - `mesh.c/h` — загрузка VBO/VAO на GPU + хранение CPU-версий (`cpu`) для picking/подсветки.
 - `render.c/h` — Blinn-Phong, двустороннее освещение, gamma, wireframe, offscreen FBO,
   **подсветка выбранной грани** (отдельный VBO с barycentric-attribute, без геометрии в 2×).
-- `img.c/h` — BMP 24bpp из FBO.
+- `img.c/h` — BMP 24bpp из FBO: вход — строки сверху вниз (`rgba[0]` = верх кадра, как возвращает
+  `render.c:fb_read_rgba`); файл пишется как bottom-up DIB (строки переворачиваются при записи).
+  Контракт зафиксирован в `img.h` и подтверждён численно (selftest + CPU-зонд).
 - `main.c` — CLI (`--render`, `--selftest`, `--wire`, `--ortho`, `--fov`, `--yaw`, `--pitch`, `--size`),
   интерактив (LMB orbit, RMB pan, wheel zoom, Ctrl+wheel fov, O/W/R/S/Esc), `pick_triangle()`,
-  самодостаточные selftest-ы (28 проверок, все зелёные).
+  самодостаточные selftest-ы (26 проверок, все зелёные; блок `BMP orientation` проверяет ориентацию
+  кадра по известным цветам верхнего/нижнего ряда).
 
 ## 4. Принятые решения (ADR-краткая форма)
 
@@ -55,18 +61,26 @@
    nearest wins независимо от порядка треугольников в файле.
 6. **Конвенции мыши проверяются, а не угадываются**: сравнение проекций граней до/после drag.
 7. **Тесты = selftest (C) + регрессия (PS1/Python)**: и геометрия, и пиксели, и коды возврата.
-8. **VCS-раскладка**: трекаются только продукт и документы — `src/`, `shaders/`, `assets/`,
+8. **Ориентация кадра — контракт, а не предположение**: пиксели от `fb_read_rgba` идут строками
+   сверху вниз (`row 0` = верх), `img_write_bmp` принимает этот порядок и сам переворачивает строки
+   при записи bottom-up DIB. Прежняя формулировка в `img.h` («row 0 = bottom») была обратной и
+   порождала перевёрнутые кадры у вызывающих (то же проявилось в зондах). Ориентация закреплена
+   численным selftest'ом и CPU-зондом, чтобы не зависеть от субъективной оценки «картинка перевёрнута».
+9. **VCS-раскладка**: трекаются только продукт и документы — `src/`, `shaders/`, `assets/`,
    `tests/*.ps1|*.py`, `Makefile`, `PLAN.md`, `PROJECT_MEMORY.md`, `Roadmap.md`, `AGENTS.md`,
    `.obj`-ассеты. Бинарники, кадры, зонды, `node_modules/` — исключены.
-9. **Вывод тестов — в `tests/out/`** (git-ignored): регрессия больше не пишет BMP в корень;
+10. **Вывод тестов — в `tests/out/`** (git-ignored): регрессия больше не пишет BMP в корень;
    каталог очищается перед каждым прогоном, файлы остаются для визуальной проверки.
 
 ## 5. Текущий статус
 
 - M0–M6b: парсер, GL-загрузчик, камера/framing, шейдер, wireframe, скриншот, offscreen BMP, CLI — готово.
 - M7: выбор граней (hover outline, click pin/unpin) + конвенции мыши + picking + outline-пиксельный
-  тест — готово, `viewer.exe --selftest` → PASS (28 проверок), `make test` → `tests: PASS`.
+  тест — готово, `viewer.exe --selftest` → PASS, `make test` → `tests: PASS`.
 - Зафиксировано: drag-конвенция корректна в обеих проекциях (perspective и ortho) и fov 20/60/80.
+- M8b (виток E6.T7): контракт ориентации кадров (`row 0` = верх) исправлен в документации `img.h`
+  и подтверждён численно: новый selftest-блок + CPU-зонд. `--selftest` → 26 `ok`, 0 `FAIL`, exit 0;
+  `tests/run_tests.ps1` → 59 `ok`, `tests: PASS`.
 - Артефакты: кадры регрессии — `tests/out/` (git-ignored), исследовательские зонды и их логи —
   `trash/probes/`, `trash/logs/` (git-ignored). В продукном каталоге артефактов нет.
 
@@ -78,6 +92,12 @@
   discovery-фазы). Пуш/PR возможны только после добавления remote и одобрения пользователя.
 - **Артефакты вне VCS**: политика зафиксирована — вывод тестов в `tests/out/`, зонды в `trash/`;
   новые пробы не должны появляться в корне или в трекаемых каталогах.
+- **HUD (E5.T1/E5.T4)**: глиф-атлас готов как CPU-маска (GDI), но путь отображения масок в GL в
+  зонде не подтверждён (см. §2 «зонды вне продукного пути»): uniform/sampler и attribute-путь в
+  hidden-window зонде ведут себя противоречиво. Решение: переносить HUD в продукт (`src/hud.c` +
+  `shaders/hud.frag`) на продукном FBO-пути или сначала добить зонд — 🔵 blocker.
+- **Отчёты шага**: сейчас в `trash/logs/report_*.md` (git-ignored). Трекаемый каталог отчётов
+  (`docs/reports/`) — 🔵 решение, увязано с E7.T3.
 - **Машинные зависимости**: Windows-only (opengl32/wgl). Кроссплатформенность не проверялась.
 - **Производительность**: picking = CPU-обход всех треугольников на каждый hover (3750 tri ≈ 0.3 ms,
   но для 1M tri нужен BVH/облок). Пока не критично, риск зафиксирован.
