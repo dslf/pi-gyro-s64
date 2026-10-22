@@ -16,3 +16,11 @@ screenshot.bmp
 
 # JS dependencies
 node_modules/
+
+deps/imgui/build/
+build/
+tests/out/
+*.obj
+*.o
+*.a
+*.pdb

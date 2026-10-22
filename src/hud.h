@@ -2,40 +2,46 @@
 #define VIEWER_HUD_H
 
 #include <stddef.h>
-#include "gl.h"
 
-#define HUD_FIRST_GLYPH 32
-#define HUD_GLYPH_COUNT 95 /* ASCII 32..126 */
+/* Text overlay built by Dear ImGui (vendored cimgui, C ABI). The viewer stays C11:
+   every C++ symbol is hidden behind this header. hud.c owns the ImGui context and the
+   GLFW/OpenGL3 backends; the caller supplies only data. */
 
-/* GDI rasterizes ASCII into a fixed-cell atlas whose cell size is measured from
-   the font, so it stays correct at any display DPI. `lum` is a top-down mask
-   (row 0 = top of the glyph) - glyph ink becomes geometry, not a texture. */
 typedef struct {
-  int cw, ch, cols, rows, w, h;
-  unsigned char* lum;
-  float ink[HUD_GLYPH_COUNT];
-  GLuint prog, vao, pos_vbo, col_vbo;
-  GLint uViewport;
-  float* pos_buf;      /* 6 vertices per ink run, 2 floats each */
-  float* col_buf;      /* 6 vertices per ink run, 4 floats each */
-  int run_cap;
-  float fg[3]; /* gamma-encoded foreground colour */
+  const char* projection;  /* "persp" | "ortho" */
+  float fov_deg;
+  float cam_dist;
+  int triangles;           /* triangles in the loaded mesh */
+  int selected;            /* highlighted triangle index, -1 = nothing selected */
+  int pinned;              /* 1 = selection pinned by a click, 0 = hover */
+  int wireframe;
+  double fps;              /* measured frames/second; 0 = not measured yet */
+} hud_info;
+
+typedef struct {
+  void* ctx;               /* ImGuiContext* (opaque here) */
+  int backends;            /* 1 = GLFW + OpenGL3 backends initialised */
+  int frames;              /* frames submitted to ImGui */
+  int rect[4];             /* last panel rect in pixel space: x0,y0,x1,y1 (top-left origin) */
+  int text_ready;          /* font atlas built: text is drawn from the 2nd frame on */
 } hud;
 
-int  hud_init(hud* h, char* err, size_t errcap);
-void hud_free(hud* h);
+/* Initialise ImGui + backends on an existing GLFW window. Returns 0 on success,
+   non-zero with a message in err. */
+int  hud_init(hud* h, void* window, char* err, size_t errcap);
+void hud_shutdown(hud* h);
 
-/* Draw `text` at pixel (x, y) with y counted from the top of the viewport. Each glyph
-   is a set of horizontal ink runs, one triangle pair per run, colour premultiplied by
-   ink. Depth test and blending are handled by the caller. */
-void hud_draw(const hud* h, int viewport_w, int viewport_h, int x, int y, const char* text);
+/* Build the panel content for this frame (ImGui NewFrame + widgets). Call before
+   hud_render. w/h are the framebuffer size in pixels. */
+void hud_frame(hud* h, int w, int h_px, const hud_info* info);
 
-/* Test helpers: ink fraction of one glyph and its per-row ink profile (top-down). */
-float hud_glyph_ink(const hud* h, char ch);
-void  hud_glyph_row_profile(const hud* h, char ch, float* prof, int prof_cap);
+/* Submit the drawn panel to OpenGL. Does not swap buffers. */
+void hud_render(hud* h);
 
-/* Copy one glyph cell of the luminance mask into `out` (cap >= cw*ch). Diagnostics for
-   the selftest, so a solid-looking cell can be dumped column by column. */
-void  hud_glyph_cell_mask(const hud* h, char ch, unsigned char* out, int cap);
+/* Panel rect of the last frame; returns 0 if nothing was drawn yet. */
+int  hud_rect(const hud* h, int* x0, int* y0, int* x1, int* y1);
+
+/* Panel background and text colours (0..1 sRGB floats) for pixel metrics. */
+void hud_colors(const hud* h, float bg[4], float text[4]);
 
 #endif

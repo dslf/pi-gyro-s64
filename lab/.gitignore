@@ -1,0 +1,9 @@
+build/
+obj/
+cimgui/
+imgui.ini
+*.exe
+*.o
+*.a
+*.bmp
+*.log

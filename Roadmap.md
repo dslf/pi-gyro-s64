@@ -81,7 +81,9 @@ work approved); Discovery-блокеры E0.T6/E4.T2/E6.T3/E6.T4/E7.T1 оста�
 
 | ID | История / Задача | Статус | Acceptance |
 |---|---|---|---|
-| E5.S1 | Понятный статус окна (fov, dist, проекция, FPS) | 🟡 | заголовок есть; FPS нет |
+| E5.S1 | Понятный статус окна (fov, dist, проекция, FPS) | 🟡 | заголовок есть; FPS — в HUD-строке (E5.T5) |
+| E5.T5 | Dear ImGui (cimgui, C ABI) как основа HUD: FPS, подсказки горячих клавиш, читаемый контраст | 🟡 | зонд `lab/imgui` зелёный (контраст 6.83:1, coverage 18.35%, кадр 0.26 ms); перенос в продукт — этот шаг |
+| E5.T6 | Сборка vendored `deps/imgui` (`libcimgui.a`) отдельным скриптом; продукт остаётся C11 | 🟡 | recipe подтверждён в зонде (`-DIMGUI_IMPL_API=extern "C"`, `imgui_demo.cpp`, `-static-libstdc++`) |
 | E5.T1 | HUD: подсказки, выбранный треугольник (id/normals) | 🟡 | текст HUD в продукте есть (`src/hud.c`, оверлей в интерактивном кадре); `id`/`normals` выбранного треугольника в HUD — 🔵 следующий шаг |
 | E5.T4 | Глиф-атлас: `GDI TextOutW` → CPU маска глифов как источник HUD-текста | ✅ | перенесено в продукт (`src/hud.c`, `shaders/hud.vert/frag`); selftest: coverage 0.99%, centroid top-left, штрихи глифа 0..30% (mean 9.5%), ориентация top-down (direct 0.126 < mirrored 0.158), детерминизм 0 px |
 | E5.T2 | Сетка/оси, несколько моделей, tone mapping | ⬜ | скриншот-тест |

@@ -27,6 +27,11 @@
 | GDI (текст) | `user32gdi32` доступен через `windows.h`: `CreateCompatibleDC`, `CreateCompatibleBitmap`, `TextOutW`, `GetPixel` — работает headless (проверено зондом `trash/probes/probe_hud.c`) |
 | Зонды вне продукного пути | в зонде с `GLFW_VISIBLE=false` (рендер в back buffer) readback даёт чёрный кадр — нужен FBO; `glGetInteger(GL_*_BINDING)` читает нули, а после `glUseProgram` появляется `0x500` (`GL_INVALID_ENUM`). Указатели GL совпадают с `glfwGetProcAddress`, но такая диагностика зонда **ненадёжна**; продукный путь (`--render` / `--selftest` через FBO) подтверждён пикселями |
 | Инструменты | `make`, `cmake`, `ninja`; нет clang/cl/vcpkg/glad/cglm/stb |
+| C++ | `g++` 14.2.0 есть (MSVC `cl` — нет). ImGui компилируется как C++; наружу отдаётся C ABI через `cimgui.h` |
+| Dear ImGui / cimgui | MIT. `cimgui` master `2a6a93f`; подмодуль `imgui` закреплён на `6d321745` (**1.93.0**, ветка `docking`). Чистого C-implementation нет — C-API даёт только обёртка cimgui. Бэкенды лежат в `imgui/backends` |
+| Сборка ImGui | `g++` + `ar`; нужен `imgui_demo.cpp` (cimgui ссылается на демо-окна); бэкенды компилируются с `-Dimplementations=` и **`-DIMGUI_IMPL_API=extern "C"`** (иначе conflict между `cimgui_impl.h` и `imgui_impl.h`). Флаг `-include` для этого в GCC не работает — только `-D` |
+| Runtime собранного с ImGui | `-static-libgcc -static-libstdc++` + `-lstdc++` → DLL только системные: `GDI32, KERNEL32, msvcrt, OPENGL32, SHELL32, USER32` (libstdc++/libgcc DLL не нужны; GLFW статический) |
+| ImGui 1.93 текстуры | режим `ImGuiBackendFlags_RendererHasTextures`: шрифт-атлас строится на `EndFrame`, текст появляется **со 2-го кадра** → warm-up ≥ 2 кадра перед снимком/pixel-метрикой. Первый кадр: 1.5 ms (FBO) / 50 ms (default FB) |
 | Git | **репозиторий создан** (`git init`, identity `pi-agent`/`agent@local`); remote отсутствует; `.gitignore` + `.gitattributes` (`* text=auto eol=lf`) |
 | pi | окружение pi.dev; session-recall через `@sting8k/pi-vcc` (package.json — только tooling, не приложение) |
 
@@ -80,6 +85,19 @@
     1–2k токена, запас 1–2k держится постоянно. Large rewrite запрещается как один вызов: файл
     пишется секциями (несколько `edit`/`append`), правки идут последовательными шагами, каждый шаг
     проверяется до следующего. План частей объявляется до первой правки.
+12. **Dear ImGui через cimgui как vendored статическая библиотека** (запрос owner). Продукт остаётся
+    C11: C++ части (imgui + cimgui + бэкенды GLFW/OpenGL3) собираются отдельным скриптом в
+    `deps/imgui/libcimgui.a`, продукт линкует её и вызывает только C-API (`cimgui.h`). Оверхед
+    компиляции C++ изолирован от `src/`, warning'ов продукта это не касается. Лицензия MIT.
+    Версии фиксируются коммитом (cimgui `2a6a93f`, imgui `6d321745` = 1.93.0 docking).
+13. **HUD текста — ImGui, GDI-атлас уходит из продукного пути.** Причина: ImGui даёт
+    контринг-хинтинг и читаемый масштаб (измерено на продуктивном FBO: контраст 6.83:1,
+    coverage 18.35%, короткие штрихи 1411 против 8 длинных при масштабе шрифта 1.5 и панели
+    360×96), плюс FPS/подсказки/будущие виджеты без своего atlas-кода. HUD-окно читает только
+    информацию: флаги `NoInputs`/`NoMove`/`NoTitleBar` — мышь и клавиши вьюера не перехватываются.
+    Oверлей остаётся только в интерактивном кадре (`app.hud_overlay`), offscreen/selftest-кадры
+    без HUD. Проверка HUD в selftest меняется с маски глифов на пиксельные метрики ImGui
+    (панель в top-left, чернила, контраст, отсутствие чернильных пикселей вне панели).
 
 ## 5. Текущий статус
 

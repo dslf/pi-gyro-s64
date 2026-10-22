@@ -25,10 +25,12 @@ typedef struct {
   gpu_mesh mesh;
   obj_mesh cpu;      /* kept after upload: cursor picking and the outline read vertices */
   renderer rend;
-  hud hudl;           /* text overlay drawn over the model, top-left of the viewport */
+  hud hudl;           /* ImGui text overlay, top-left of the viewport */
   int width, height;
   int wireframe;
   int hud_overlay;      /* HUD is drawn only in interactive frames; offscreen renders stay HUD-free */
+  double last_draw;     /* timestamp of the previous rendered frame, for the FPS readout */
+  double fps;           /* smoothed frames/second shown in the HUD */
   int dirty;
   int pressing;      /* left button held down, so a release can be read as a pick */
   double pressx, pressy;
@@ -194,15 +196,20 @@ static void draw_scene(app* a, const framebuffer* fb) {
   renderer_draw(&a->rend, &a->mesh, &vp, &model, &nmat, eye, a->wireframe);
   my_glDisable(GL_DEPTH_TEST);
 
-  /* HUD overlay: camera state plus the picked triangle, top-left in pixel space. */
+  /* HUD overlay: camera state, the picked triangle and the hotkeys, top-left in pixel space. */
   if (a->hud_overlay) {
     int sel = a->locked >= 0 ? a->locked : a->hover;
-    char line1[160], line2[160];
-    snprintf(line1, sizeof line1, "%s  fov %.0f deg  dist %.2f", a->cam.ortho ? "ortho" : "persp", a->cam.fov_deg, a->cam.dist);
-    snprintf(line2, sizeof line2, "%d tris  selected %d%s", a->cpu.triangles, sel,
-             sel < 0 ? " (none)" : (a->locked >= 0 ? " (pinned)" : " (hover)"));
-    hud_draw(&a->hudl, w, h, 6, 4, line1);
-    hud_draw(&a->hudl, w, h, 6, 4 + a->hudl.ch, line2);
+    hud_info info;
+    info.projection = a->cam.ortho ? "ortho" : "persp";
+    info.fov_deg = a->cam.fov_deg;
+    info.cam_dist = a->cam.dist;
+    info.triangles = a->cpu.triangles;
+    info.selected = sel;
+    info.pinned = a->locked >= 0;
+    info.wireframe = a->wireframe;
+    info.fps = a->fps;
+    hud_frame(&a->hudl, w, h, &info);
+    hud_render(&a->hudl);
   }
 
   if (fb) my_glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -269,7 +276,7 @@ static int init_gl(app* a, int w, int h, int visible) {
   printf("GPU : %s\n", gpu ? gpu : "unknown");
 
   char hud_err[256] = "";
-  if (hud_init(&a->hudl, hud_err, sizeof hud_err) < 0) {
+  if (hud_init(&a->hudl, a->win, hud_err, sizeof hud_err) != 0) {
     fprintf(stderr, "HUD init failed: %s\n", hud_err);
     glfwDestroyWindow(a->win);
     glfwTerminate();
@@ -302,6 +309,12 @@ static int run_interactive(app* a, const char* model_path) {
   while (!glfwWindowShouldClose(a->win)) {
     handle_mouse(a);
     if (a->dirty) {
+      double now = glfwGetTime();
+      if (a->last_draw > 0.0) {
+        double dt = now - a->last_draw;
+        if (dt > 0.0) a->fps = a->fps > 0.0 ? 0.7 * a->fps + 0.3 * (1.0 / dt) : 1.0 / dt;
+      }
+      a->last_draw = now;
       draw_scene(a, NULL);
       update_title(a);
       glfwSwapBuffers(a->win);
@@ -734,28 +747,20 @@ static void diff_centroid(const unsigned char* a, const unsigned char* b, int w,
   *cy = n ? (double)sy / (double)n : 0.0;
 }
 
-/* Fraction of changed pixels per row inside one HUD glyph cell, rows top-down. */
-static void rendered_row_profile(const unsigned char* base, const unsigned char* hud, int w,
-                                 int x0, int cw, int y0, int ch, float* prof, int cap) {
-  for (int v = 0; v < cap; v++) prof[v] = 0.0f;
-  for (int v = 0; v < ch && v < cap; v++) {
-    int ink = 0;
-    for (int c = 0; c < cw; c++) {
-      int x = x0 + c, y = y0 + v;
-      const unsigned char* p = base + ((size_t)y * w + x) * 4;
-      const unsigned char* q = hud + ((size_t)y * w + x) * 4;
-      int dr = p[0] - q[0], dg = p[1] - q[1], db = p[2] - q[2];
-      if (dr * dr + dg * dg + db * db > 16 * 16) ink++;
-    }
-    prof[v] = (float)ink / (float)cw;
-  }
+/* Perceptual helpers for HUD readability: relative luminance, sRGB linearisation and the
+   WCAG contrast ratio. All thresholds are relative so another GPU/AA path still passes. */
+static double lum3(unsigned r, unsigned g, unsigned b) {
+  return (r * 30.0 + g * 59.0 + b * 11.0) / 100.0;
 }
 
-/* Mean absolute difference between two row profiles; used for orientation checks. */
-static float profile_delta(const float* a, const float* b, int n) {
-  float sum = 0.0f;
-  for (int i = 0; i < n; i++) sum += fabsf(a[i] - b[i]);
-  return sum / (float)n;
+static double srgb_lin(double v) {
+  return v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4);
+}
+
+static double wcag_ratio(double a, double b) {
+  double la = srgb_lin(a / 255.0), lb = srgb_lin(b / 255.0);
+  if (la < lb) { double t = la; la = lb; lb = t; }
+  return (la + 0.05) / (lb + 0.05);
 }
 
 /* The HUD is the overlay, so it is measured against the same scene drawn without it:
@@ -764,7 +769,7 @@ static float profile_delta(const float* a, const float* b, int n) {
 static void hud_selftest(app* a, int* fails) {
   printf("selftest: HUD overlay\n");
   char err[256] = "";
-  const int w = 320, h = 200;
+  const int w = 560, h = 240;   /* large enough to hold the whole HUD panel */
   framebuffer fb;
   if (fb_create(&fb, w, h, err, sizeof err) < 0) {
     printf("  FAIL hud framebuffer: %s\n", err);
@@ -772,15 +777,19 @@ static void hud_selftest(app* a, int* fails) {
     return;
   }
 
-  static unsigned char px[320 * 200 * 4];
-  static unsigned char px2[320 * 200 * 4];
-  static unsigned char px3[320 * 200 * 4];
+  static unsigned char px[560 * 240 * 4];
+  static unsigned char px2[560 * 240 * 4];
+  static unsigned char px3[560 * 240 * 4];
   camera_reset(&a->cam, a->mesh.fit);
 
   a->hud_overlay = 0;
   draw_scene(a, &fb);
   int rc = fb_read_rgba(&fb, px, err, sizeof err);
   a->hud_overlay = 1;
+  /* ImGui builds the font atlas at EndFrame and the backend uploads it on the next NewFrame,
+     so the first overlay frame carries no glyphs. Warm up before measuring pixels. */
+  draw_scene(a, &fb);
+  draw_scene(a, &fb);
   draw_scene(a, &fb);
   rc |= fb_read_rgba(&fb, px2, err, sizeof err);
   draw_scene(a, &fb);
@@ -818,76 +827,108 @@ static void hud_selftest(app* a, int* fails) {
     printf("  ok   HUD layout is deterministic (0 pixels moved on redraw)\n");
   }
 
-  /* First glyph cell of the first line, drawn at (6, 4). */
-  const int cw = a->hudl.cw, ch = a->hudl.ch;
-  const char first = a->cam.ortho ? 'o' : 'p';
-  float mask[32], got[32];
-  const int cap = ch < 32 ? ch : 32;
-  hud_glyph_row_profile(&a->hudl, first, mask, cap);
-  rendered_row_profile(px, px2, w, 6, cw, 4, ch, got, cap);
-
-  float lo = 1.0f, hi = 0.0f, ink_rows = 0.0f;
-  for (int v = 0; v < cap; v++) {
-    if (got[v] < lo) lo = got[v];
-    if (got[v] > hi) hi = got[v];
-    ink_rows += got[v];
+  /* The panel rect ImGui reported is the measurement box: ink must stay inside it, and it
+     must be classified against the panel the overlay blended over. */
+  int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+  if (!hud_rect(&a->hudl, &x0, &y0, &x1, &y1)) {
+    printf("  FAIL hud panel rect unknown - ImGui drew nothing\n");
+    (*fails)++;
+    fb_free(&fb);
+    return;
   }
-  if (hi - lo < 0.15f) {
-    printf("  FAIL glyph '%c' cell is flat (row ink %.1f%%..%.1f%%) - geometry is not glyph-shaped\n",
-           first, lo * 100.0f, hi * 100.0f);
-    if (cw * ch <= 512) {
-      unsigned char cell[512];
-      hud_glyph_cell_mask(&a->hudl, first, cell, cw * ch);
-      printf("  mask cell (ink where lum < 160):\n");
-      for (int v = 0; v < ch; v++) {
-        printf("    %2d ", v);
-        for (int c = 0; c < cw; c++) printf("%c", cell[v * cw + c] < 160 ? '#' : '.');
-        printf("\n");
-      }
-      printf("  rendered HUD pixels in the same cell:\n");
-      for (int v = 0; v < ch; v++) {
-        printf("    %2d ", v);
-        for (int c = 0; c < cw; c++) {
-          int x = 6 + c, y = 4 + v;
-          const unsigned char* p = px + ((size_t)y * w + x) * 4;
-          const unsigned char* q = px2 + ((size_t)y * w + x) * 4;
-          int dr = p[0] - q[0], dg = p[1] - q[1], db = p[2] - q[2];
-          printf("%c", dr * dr + dg * dg + db * db > 16 * 16 ? '#' : '.');
+  if (x1 > w) x1 = w;
+  if (y1 > h) y1 = h;
+  printf("  ok   hud rect %d..%d x %d..%d (%d x %d px)\n", x0, x1, y0, y1, x1 - x0, y1 - y0);
+
+  float bgc[4], txtc[4];
+  hud_colors(&a->hudl, bgc, txtc);
+  double bg_lum = lum3((unsigned)(bgc[0] * 255.0f), (unsigned)(bgc[1] * 255.0f),
+                       (unsigned)(bgc[2] * 255.0f));
+  double txt_lum = lum3((unsigned)(txtc[0] * 255.0f), (unsigned)(txtc[1] * 255.0f),
+                        (unsigned)(txtc[2] * 255.0f));
+  double requested = wcag_ratio(txt_lum, bg_lum);
+  printf("  ok   hud palette: text lum %.1f on panel bg lum %.1f (requested %.2f:1)\n",
+         txt_lum, bg_lum, requested);
+  if (requested < 4.5) {
+    printf("  FAIL hud palette contrast %.2f:1 is below WCAG AA 4.5:1\n", requested);
+    (*fails)++;
+  }
+
+  /* Per pixel reference: the panel blends over whatever the scene had at that pixel, so the
+     panel level is computed from the base frame instead of a constant. */
+  double panel_sum = 0, ink_sum = 0;
+  long ink_n = 0, panel_n = 0, outside_n = 0;
+  double ink_max = 0;
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      const unsigned char* p = px + ((size_t)y * w + x) * 4;
+      const unsigned char* q = px2 + ((size_t)y * w + x) * 4;
+      double scene = lum3(p[2], p[1], p[0]);
+      double panel_ref = bgc[3] * bg_lum + (1.0 - bgc[3]) * scene;
+      double l = lum3(q[2], q[1], q[0]);
+      if (x >= x0 && x < x1 && y >= y0 && y < y1) {
+        if (l > panel_ref + 25.0) {
+          ink_sum += l; ink_n++;
+          if (l > ink_max) ink_max = l;
+        } else {
+          panel_sum += l; panel_n++;
         }
-        printf("\n");
+      } else {
+        int dr = p[2] - q[2], dg = p[1] - q[1], db = p[0] - q[0];
+        if (dr * dr + dg * dg + db * db > 8 * 8) outside_n++;
       }
     }
+  }
+  double panel_lum = panel_n ? panel_sum / (double)panel_n : 0;
+  double ink_lum = ink_n ? ink_sum / (double)ink_n : 0;
+  double area = (double)(x1 - x0) * (double)(y1 - y0);
+  double coverage = area > 0 ? 100.0 * (double)ink_n / area : 0.0;
+  double contrast = wcag_ratio(ink_lum, panel_lum);
+  printf("  ok   hud ink mean lum %.1f (max %.1f), panel mean lum %.1f\n", ink_lum, ink_max, panel_lum);
+  printf("  ok   hud ink coverage %.2f%% of panel, contrast %.2f:1 (WCAG)\n", coverage, contrast);
+
+  if (ink_n < 40) {
+    printf("  FAIL hud ink: %ld pixels - overlay is not visible\n", ink_n);
     (*fails)++;
-  } else {
-    printf("  ok   glyph '%c' has stroke structure (row ink %.1f%%..%.1f%%, mean %.1f%%)\n",
-           first, lo * 100.0f, hi * 100.0f, ink_rows / (float)cap * 100.0f);
+  }
+  if (coverage > 45.0) {
+    printf("  FAIL hud ink covers %.2f%% of the panel - a slab, not glyphs\n", coverage);
+    (*fails)++;
+  }
+  /* Readability floor: WCAG AA for body text is 4.5:1; the profile from lab/imgui is ~6.8:1. */
+  if (contrast < 4.5) {
+    printf("  FAIL hud text contrast %.2f:1 is below WCAG AA 4.5:1\n", contrast);
+    (*fails)++;
+  }
+  if (outside_n != 0) {
+    printf("  FAIL hud ink leaked outside its panel rect: %ld pixels\n", outside_n);
+    (*fails)++;
   }
 
-  /* Orientation: rendered rows must match the CPU mask rows top-down, not mirrored. */
-  float mirror[32];
-  for (int v = 0; v < cap; v++) mirror[v] = mask[cap - 1 - v];
-  float direct = profile_delta(got, mask, cap);
-  float flipped = profile_delta(got, mirror, cap);
-  printf("  glyph '%c' vs mask: direct %.3f, mirrored %.3f\n", first, direct, flipped);
-  if (direct >= flipped) {
-    printf("  FAIL glyph rows match the mask better when mirrored (direct %.3f >= mirrored %.3f)\n", direct, flipped);
-    (*fails)++;
-  } else if (direct > 0.30f) {
-    printf("  FAIL glyph rows do not match the mask (direct %.3f)\n", direct);
-    (*fails)++;
-  } else {
-    printf("  ok   glyph orientation matches the mask top-down (direct %.3f < mirrored %.3f)\n", direct, flipped);
+  /* Stroke structure: glyph strokes are short runs; a solid bar would give long runs. */
+  long short_runs = 0, long_runs = 0;
+  for (int y = y0; y < y1; y++) {
+    int run = 0;
+    for (int x = x0; x < x1; x++) {
+      const unsigned char* p = px + ((size_t)y * w + x) * 4;
+      const unsigned char* q = px2 + ((size_t)y * w + x) * 4;
+      double scene = lum3(p[2], p[1], p[0]);
+      double panel_ref = bgc[3] * bg_lum + (1.0 - bgc[3]) * scene;
+      if (lum3(q[2], q[1], q[0]) > panel_ref + 25.0) run++;
+      else if (run > 0) { if (run <= 12) short_runs++; else long_runs++; run = 0; }
+    }
+    if (run > 0) { if (run <= 12) short_runs++; else long_runs++; }
   }
-
-  /* Ink must stay ink: most of the cell must still be background, not a solid slab. */
-  int cell_px = cw * ch;
-  int cell_ink = region_diff_count(px, px2, w, h, 6, 4, 6 + cw, 4 + ch, 8);
-  double bg = 1.0 - (double)cell_ink / (double)cell_px;
-  if (bg < 0.40) {
-    printf("  FAIL glyph cell is %.1f%% ink - a slab, not text\n", (1.0 - bg) * 100.0);
+  printf("  ok   ink runs: short(<=12px)=%ld long(>12px)=%ld, ratio %.2f\n", short_runs, long_runs,
+         long_runs ? (double)short_runs / (double)long_runs : 99.0);
+  if (short_runs < 20) {
+    printf("  FAIL hud has %ld short glyph runs - text is not drawn\n", short_runs);
     (*fails)++;
-  } else {
-    printf("  ok   glyph cell keeps %.1f%% background around the ink\n", bg * 100.0);
+  }
+  if (long_runs > short_runs) {
+    printf("  FAIL hud ink is dominated by long runs (%ld vs %ld) - solid bars, not glyphs\n",
+           long_runs, short_runs);
+    (*fails)++;
   }
 
   fb_free(&fb);
@@ -1116,7 +1157,7 @@ int main(int argc, char** argv) {
   else rc = run_interactive(&a, model);
 
   renderer_free(&a.rend);
-  hud_free(&a.hudl);
+  hud_shutdown(&a.hudl);
   mesh_free(&a.mesh);
   obj_mesh_free(&a.cpu);
   glfwDestroyWindow(a.win);
