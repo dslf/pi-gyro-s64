@@ -32,6 +32,7 @@
 | Сборка ImGui | `g++` + `ar`; нужен `imgui_demo.cpp` (cimgui ссылается на демо-окна); бэкенды компилируются с `-Dimplementations=` и **`-DIMGUI_IMPL_API=extern "C"`** (иначе conflict между `cimgui_impl.h` и `imgui_impl.h`). Флаг `-include` для этого в GCC не работает — только `-D` |
 | Runtime собранного с ImGui | `-static-libgcc -static-libstdc++` + `-lstdc++` → DLL только системные: `GDI32, KERNEL32, msvcrt, OPENGL32, SHELL32, USER32` (libstdc++/libgcc DLL не нужны; GLFW статический) |
 | ImGui 1.93 текстуры | режим `ImGuiBackendFlags_RendererHasTextures`: шрифт-атлас строится на `EndFrame`, текст появляется **со 2-го кадра** → warm-up ≥ 2 кадра перед снимком/pixel-метрикой. Первый кадр: 1.5 ms (FBO) / 50 ms (default FB) |
+| GLFW resize (Windows) | При перетаскивании границы ОС запускает **modal message loop** внутри `DefWindowProc`: `glfwPollEvents` и все GLFW-коллеки (framebuffer size) не вызываются до конца drag'а → чёрные полосы. Выход: размер читается из `glfwGetFramebufferSize` каждый кадр + перерисование в `glfwSetWindowRefreshCallback` (вызывается из WM_PAINT внутри modal loop) |
 | Git | **репозиторий создан** (`git init`, identity `pi-agent`/`agent@local`); remote отсутствует; `.gitignore` + `.gitattributes` (`* text=auto eol=lf`) |
 | pi | окружение pi.dev; session-recall через `@sting8k/pi-vcc` (package.json — только tooling, не приложение) |
 
@@ -105,6 +106,15 @@
     чернильных пикселей вне панелей, зазор между панелями, детерминизм повторного кадра и
     перенос подсказок на узком кадре (420×320).
 
+14. **Resize окна перерисовывается сразу, не после конца drag'а.** Размер цели
+кадра не кэшируется из callback'а: `sync_framebuffer_size()` каждый кадр читает
+`glfwGetFramebufferSize` и обновляет viewport/аспект/HUD до отрисовки. Дополнительно
+регистрируется refresh-коллек: на Windows перетаскивание границы держит модальный
+цикл сообщений, где наш игра-луп не получает ничего, и единственный способ нарисовать
+новый клиент — перерисовать в коллеке на WM_PAINT (`draw_scene` + `glfwSwapBuffers`).
+Ответственность остаётся в `main.c` (`sync_framebuffer_size`, `on_refresh`); камера
+по-прежнему получает аспект из размера цели в `draw_scene`.
+
 ## 5. Текущий статус
 
 - M0–M6b: парсер, GL-загрузчик, камера/framing, шейдер, wireframe, скриншот, offscreen BMP, CLI — готово.
@@ -116,10 +126,18 @@
 - M9 (E5.T5/E5.T6): HUD переведён на **Dear ImGui** (vendored cimgui + imgui 1.93.0, C ABI).
   Коммиты `1023dff` (GDI-атлас, исторический) → `02aa288` (ImGui, GDI-путь удалён, `shaders/hud.*`
   удалены). Сборка: `make` сначала вызывает `deps/imgui/build.ps1` → `deps/imgui/build/libcimgui.a`.
-  Профиль по умолчанию: font scale 1.0, панель 380×96. Проверено: `--selftest` PASS
-  (stats rect 8..388 × 8..104, coverage 10.02%, контраст 6.51:1; help rect 100..860 × 196..312,
-  coverage 5.71%, контраст 6.47:1, перенос подсказок на узком кадре 760×116 → 404×184),
+  Профиль по умолчанию: font scale 1.0, обе панели авто-размерны по обеим осям (пустых строк нет).
+  Проверено: `--selftest` PASS
+  (stats rect 8..528 × 8..75, coverage 11.93%, контраст 6.57:1; help rect 100..860 × 196..312,
+  coverage 11.86%, контраст 6.32:1, перенос подсказок на узком кадре 760×116 → 404×184,
+  худший пустой зазор 1 px, без выбора карточка сжимается 520×67 → 349×48),
   `tests/run_tests.ps1` → `tests: PASS`, интерактивный запуск — окно живёт, GL-ошибок нет.
+- M10 (E5.S1/E5.R3): resize окна перерисовывается сразу — размер читается из окна
+  каждый кадр (`sync_framebuffer_size`), перерисование в refresh-коллеке на WM_PAINT
+  (модальный цикл Windows не дознается до конца drag'а). Числовая проверка:
+  `grown target 256x192 -> 512x384: corner vs background max diff 0, black pixels in the newly
+  exposed area 0, silhouette coverage 27.54%` и зонд `trash/probes/probe_resize.ps1`
+  (`repaints 3, fps 170.0, sizes 1264x861 -> 684x441, stderr пуст`) — обе зелёные.
 - Артефакты: кадры регрессии — `tests/out/` (git-ignored), исследовательские зонды и их логи —
   `trash/probes/`, `trash/logs/` (git-ignored). В продукном каталоге артефактов нет.
 

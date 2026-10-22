@@ -33,6 +33,8 @@ typedef struct {
   double last_draw;     /* timestamp of the previous rendered frame, for the FPS readout */
   double fps;           /* smoothed frames/second shown in the HUD */
   unsigned long long frames; /* frames drawn since the loop started */
+  unsigned long long refreshes; /* repaints driven by the OS (WM_PAINT), e.g. mid-drag resize */
+  int logged_w, logged_h;     /* size last printed, so one resize burst logs one line */
   double idle_report;   /* --idle-report <sec>: redraw without input and report the frame rate */
   int dirty;
   int pressing;      /* left button held down, so a release can be read as a pick */
@@ -68,9 +70,27 @@ static void update_title(app* a) {
   glfwSetWindowTitle(a->win, t);
 }
 
+/* The draw target's size is read from the window, not cached from a callback. Windows runs a
+   modal message loop inside DefWindowProc while the user drags a window border, so glfwPollEvents
+   and every GLFW callback are unreachable until the drag ends; a cached size would leave a black
+   band over the newly exposed client area. glfwGetFramebufferSize is cheap, so this runs every
+   frame and the viewport/aspect/HUD always match the real client size. */
+static int sync_framebuffer_size(app* a) {
+  int fw = a->width, fh = a->height;
+  glfwGetFramebufferSize(a->win, &fw, &fh);
+  if (fw < 1) fw = 1;
+  if (fh < 1) fh = 1;
+  if (fw == a->width && fh == a->height) return 0;
+  a->width = fw;
+  a->height = fh;
+  a->dirty = 1;
+  return 1;
+}
+
 static void on_resize(GLFWwindow* win, int w, int h) {
   app* a = of(win);
-  a->width = w; a->height = h;
+  a->width = w < 1 ? 1 : w;
+  a->height = h < 1 ? 1 : h;
   a->dirty = 1;
 }
 
@@ -237,6 +257,17 @@ static void draw_scene(app* a, const framebuffer* fb) {
   if (fb) my_glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+/* Repaint on demand. GLFW calls this from WM_PAINT, which while Windows is inside the modal
+   resize loop is the only chance to draw: without it the enlarged window shows the old frame over
+   a black band until the user releases the border. */
+static void on_refresh(GLFWwindow* win) {
+  app* a = of(win);
+  a->refreshes++;
+  sync_framebuffer_size(a);
+  draw_scene(a, NULL);
+  glfwSwapBuffers(win);
+}
+
 static int load_model(app* a, const char* path) {
   obj_mesh_free(&a->cpu);
   memset(&a->cpu, 0, sizeof a->cpu);
@@ -311,8 +342,10 @@ static int run_interactive(app* a, const char* model_path) {
   int w = 800, h = 600;
   glfwGetWindowSize(a->win, &w, &h);
   a->width = w; a->height = h;
+  a->logged_w = w; a->logged_h = h;   /* the first frame is not a resize */
   glfwSetWindowUserPointer(a->win, a);
   glfwSetFramebufferSizeCallback(a->win, on_resize);
+  glfwSetWindowRefreshCallback(a->win, on_refresh);
   glfwSetScrollCallback(a->win, on_scroll);
   glfwSetKeyCallback(a->win, on_key);
 
@@ -323,6 +356,7 @@ static int run_interactive(app* a, const char* model_path) {
   }
   if (load_model(a, model_path) < 0) return -2;
 
+  printf("resize: live repaint - frame size read from the window every frame, redraw from WM_PAINT\n");
   printf("controls: LMB rotate | RMB pan | wheel zoom | Ctrl+wheel fov | [ ] fov | O ortho/perspective\n");
   printf("          W wire | R reset | S screenshot | hover outlines a triangle, click pins it | Esc quit\n");
   a->dirty = 1;
@@ -336,6 +370,7 @@ static int run_interactive(app* a, const char* model_path) {
   unsigned long long win_frames = 0;
   while (!glfwWindowShouldClose(a->win)) {
     glfwPollEvents();
+    sync_framebuffer_size(a);   /* catches a resize even if the callback was never dispatched */
     handle_mouse(a);
 
     double now = glfwGetTime();
@@ -353,13 +388,19 @@ static int run_interactive(app* a, const char* model_path) {
     }
 
     draw_scene(a, NULL);
+    if (a->width != a->logged_w || a->height != a->logged_h) {
+      printf("resize: %dx%d (repaints during the drag: %llu)\n", a->width, a->height, a->refreshes);
+      a->logged_w = a->width;
+      a->logged_h = a->height;
+    }
     if (a->dirty) { update_title(a); a->dirty = 0; }
     glfwSwapBuffers(a->win);
     GLenum e = gl_check_error();
     if (e != GL_NO_ERROR) fprintf(stderr, "GL error 0x%x in frame\n", (unsigned)e);
 
     if (a->idle_report > 0.0 && now - t0 >= a->idle_report) {
-      printf("idle: %llu frames in %.2f s, fps %.1f\n", a->frames, now - t0, a->fps);
+      printf("idle: %llu frames in %.2f s, fps %.1f, resize repaints %llu\n",
+             a->frames, now - t0, a->fps, a->refreshes);
       break;
     }
   }
@@ -1212,6 +1253,82 @@ static void hud_selftest(app* a, int* fails) {
   fb_free(&fb);
 }
 
+/* The draw target must follow the size in the same frame it changes: a cached size would leave
+   black pixels wherever the window grew. Checked numerically - the newly exposed area of a grown
+   target must be the background, never black. */
+static void resize_selftest(app* a, int* fails) {
+  printf("selftest: frame size follows the target immediately (resize repaint)\n");
+  char err[256] = "";
+  int win_w = 0, win_h = 0;
+  glfwGetFramebufferSize(a->win, &win_w, &win_h);
+
+  int saved_w = a->width, saved_h = a->height;
+  a->width = 7; a->height = 3;              /* pretend the resize callback never fired */
+  int changed = sync_framebuffer_size(a);
+  int ok = changed == 1 && a->width == win_w && a->height == win_h;
+  printf("  %s size re-read from the window: 7x3 -> %dx%d (changed=%d, window says %dx%d)\n",
+         ok ? "ok  " : "FAIL", a->width, a->height, changed, win_w, win_h);
+  if (!ok) (*fails)++;
+  a->width = saved_w; a->height = saved_h;
+
+  const int sw = 256, sh = 192, bw = 512, bh = 384;
+  framebuffer small_fb, big_fb;
+  memset(&small_fb, 0, sizeof small_fb);
+  memset(&big_fb, 0, sizeof big_fb);
+  if (fb_create(&small_fb, sw, sh, err, sizeof err) != 0 ||
+      fb_create(&big_fb, bw, bh, err, sizeof err) != 0) {
+    printf("  FAIL resize framebuffers: %s\n", err);
+    (*fails)++;
+    fb_free(&small_fb);
+    fb_free(&big_fb);
+    return;
+  }
+
+  static unsigned char px_small[256 * 192 * 4];
+  static unsigned char px_big[512 * 384 * 4];
+  camera_reset(&a->cam, a->mesh.fit);
+  draw_scene(a, &small_fb);
+  draw_scene(a, &big_fb);
+  int rc = fb_read_rgba(&small_fb, px_small, err, sizeof px_small);
+  rc |= fb_read_rgba(&big_fb, px_big, err, sizeof px_big);
+  fb_free(&small_fb);
+  fb_free(&big_fb);
+  if (rc != 0) {
+    printf("  FAIL resize readback: %s\n", err);
+    (*fails)++;
+    return;
+  }
+
+  /* Corner of the first target is the clear colour; the grown target must clear to the same
+     colour everywhere, including the strip that did not exist before. */
+  const unsigned char* bg = px_small;
+  const int cx[4] = { 0, bw - 1, 0, bw - 1 };
+  const int cy[4] = { 0, 0, bh - 1, bh - 1 };
+  int corner_diff = 0;
+  for (int i = 0; i < 4; i++) {
+    const unsigned char* p = px_big + ((size_t)cy[i] * bw + cx[i]) * 4;
+    for (int c = 0; c < 3; c++) {
+      int d = (int)p[c] - (int)bg[c];
+      if (d < 0) d = -d;
+      if (d > corner_diff) corner_diff = d;
+    }
+  }
+  long black_new = 0;
+  for (int y = 0; y < bh; y++) {
+    for (int x = 0; x < bw; x++) {
+      if (x < sw && y < sh) continue;   /* only the newly exposed area */
+      const unsigned char* p = px_big + ((size_t)y * bw + x) * 4;
+      if (p[0] == 0 && p[1] == 0 && p[2] == 0) black_new++;
+    }
+  }
+  double cov = img_changed_fraction(px_big, bw, bh, 8);
+  int ok2 = corner_diff <= 12 && black_new == 0 && cov > 0.02;
+  printf("  %s grown target %dx%d -> %dx%d: corner vs background max diff %d (budget 12), "
+         "black pixels in the newly exposed area %ld, silhouette coverage %.2f%% (>2%%)\n",
+         ok2 ? "ok  " : "FAIL", sw, sh, bw, bh, corner_diff, black_new, cov * 100.0);
+  if (!ok2) (*fails)++;
+}
+
 static int run_selftest(app* a) {
   int fails = 0;
   printf("selftest: OBJ parser\n");
@@ -1325,6 +1442,7 @@ static int run_selftest(app* a) {
   orbit_drag_selftest(&fails);
   mouse_pick_selftest(&fails);
   hud_selftest(a, &fails);
+  resize_selftest(a, &fails);
 
   printf("selftest: %s\n", fails == 0 ? "PASS" : "FAILED");
   return fails == 0 ? 0 : 1;
