@@ -24,6 +24,8 @@ typedef struct {
   int frames;              /* frames submitted to ImGui */
   int rect[4];             /* last panel rect in pixel space: x0,y0,x1,y1 (top-left origin) */
   int text_ready;          /* font atlas built: text is drawn from the 2nd frame on */
+  float margin;            /* panel offset from the top-left corner, in pixels */
+  float panel_w, panel_h;  /* requested panel size in pixels (env-tunable) */
 } hud;
 
 /* Initialise ImGui + backends on an existing GLFW window. Returns 0 on success,

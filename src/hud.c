@@ -8,16 +8,24 @@
 
 #include <GLFW/glfw3.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
-/* Readability profile measured in lab/imgui (FBO pixels, WCAG contrast):
-   font scale 1.5 on a dark panel gives ink/panel contrast ~6.8:1 with glyph strokes
-   made of short runs (real letter shapes), not solid bars. */
+/* Readability profile: ImGui glyphs at font scale 1 are far cleaner than the old GDI atlas.
+   Env overrides (HUD_FONT_SCALE, HUD_W, HUD_H) exist for tuning - the pixel selftest reports
+   WCAG contrast and ink coverage for whatever profile is in effect. */
 #define HUD_FONT_BASE 17.0f
-#define HUD_FONT_SCALE 1.5f
+#define HUD_FONT_SCALE 1.0f
 #define HUD_MARGIN 8.0f
-#define HUD_W 480.0f
-#define HUD_H 112.0f
+#define HUD_W 380.0f
+#define HUD_H 96.0f
+
+static float env_f(const char* name, float fallback) {
+  const char* v = getenv(name);
+  if (!v || !*v) return fallback;
+  float x = strtof(v, NULL);
+  return x > 0.0f ? x : fallback;
+}
 
 int hud_init(hud* h, void* window, char* err, size_t errcap) {
   memset(h, 0, sizeof *h);
@@ -32,14 +40,21 @@ int hud_init(hud* h, void* window, char* err, size_t errcap) {
   }
   h->ctx = ctx;
 
+  const float scale = env_f("HUD_FONT_SCALE", HUD_FONT_SCALE);
+  const float w = env_f("HUD_W", HUD_W);
+  const float hh = env_f("HUD_H", HUD_H);
+
   ImGuiStyle* st = igGetStyle();
   igStyleColorsDark(st);
   st->FontSizeBase = HUD_FONT_BASE;
-  st->FontScaleMain = HUD_FONT_SCALE;
-  st->Colors[ImGuiCol_WindowBg] = (ImVec4){ 0.10f, 0.12f, 0.16f, 0.92f };
-  st->Colors[ImGuiCol_Text] = (ImVec4){ 0.92f, 0.96f, 1.00f, 1.00f };
-  st->FramePadding = (ImVec2){ 6.0f, 3.0f };
-  st->ItemSpacing = (ImVec2){ 6.0f, 2.0f };
+  st->FontScaleMain = scale;
+  st->Colors[ImGuiCol_WindowBg] = (ImVec4){ 0.08f, 0.10f, 0.14f, 0.94f };
+  st->Colors[ImGuiCol_Text] = (ImVec4){ 0.95f, 0.97f, 1.00f, 1.00f };
+  /* Tight info card: no border, small rounding, compact line spacing. */
+  st->WindowPadding = (ImVec2){ 8.0f, 6.0f };
+  st->ItemSpacing = (ImVec2){ 0.0f, 2.0f };
+  st->WindowRounding = 4.0f;
+  st->WindowBorderSize = 0.0f;
 
   if (!ImGui_ImplGlfw_InitForOpenGL((GLFWwindow*)window, true)) {
     snprintf(err, errcap, "hud_init: GLFW backend failed (imgui %s)", igGetVersion());
@@ -59,8 +74,11 @@ int hud_init(hud* h, void* window, char* err, size_t errcap) {
     snprintf(err, errcap, "hud_init: default font not created (imgui %s)", igGetVersion());
     return -5;
   }
+  h->margin = HUD_MARGIN;
+  h->panel_w = w;
+  h->panel_h = hh;
   printf("hud: imgui %s, font scale %.2f, panel %.0fx%.0f px\n",
-         igGetVersion(), HUD_FONT_SCALE, HUD_W, HUD_H);
+         igGetVersion(), scale, w, hh);
   return 0;
 }
 
@@ -90,8 +108,8 @@ void hud_frame(hud* h, int w, int h_px, const hud_info* info) {
   io->DisplayFramebufferScale = (ImVec2){ 1.0f, 1.0f };
   igNewFrame();
 
-  igSetNextWindowPos((ImVec2){ HUD_MARGIN, HUD_MARGIN }, ImGuiCond_Always, (ImVec2){ 0.0f, 0.0f });
-  igSetNextWindowSize((ImVec2){ HUD_W, HUD_H }, ImGuiCond_Always);
+  igSetNextWindowPos((ImVec2){ h->margin, h->margin }, ImGuiCond_Always, (ImVec2){ 0.0f, 0.0f });
+  igSetNextWindowSize((ImVec2){ h->panel_w, h->panel_h }, ImGuiCond_Always);
   /* Info-only panel: it must never take mouse or keyboard focus from the viewer. */
   if (!igBegin("hud", NULL, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
