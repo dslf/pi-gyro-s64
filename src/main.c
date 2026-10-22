@@ -31,6 +31,8 @@ typedef struct {
   int hud_overlay;      /* HUD is drawn only in interactive frames; offscreen renders stay HUD-free */
   double last_draw;     /* timestamp of the previous rendered frame, for the FPS readout */
   double fps;           /* smoothed frames/second shown in the HUD */
+  unsigned long long frames; /* frames drawn since the loop started */
+  double idle_report;   /* --idle-report <sec>: redraw without input and report the frame rate */
   int dirty;
   int pressing;      /* left button held down, so a release can be read as a pick */
   double pressx, pressy;
@@ -306,23 +308,40 @@ static int run_interactive(app* a, const char* model_path) {
   a->dirty = 1;
   a->hud_overlay = 1; /* the overlay belongs to the interactive window, not to measurement frames */
 
+  /* The HUD is live text (fps, cursor pick), so the loop redraws every frame, with or without
+     input. No artificial pacing: the swap/vsync and GPU set the real rate, and the fps readout
+     counts frames inside a time window. */
+  double t0 = glfwGetTime();
+  double win_t = t0;
+  unsigned long long win_frames = 0;
   while (!glfwWindowShouldClose(a->win)) {
+    glfwPollEvents();
     handle_mouse(a);
-    if (a->dirty) {
-      double now = glfwGetTime();
-      if (a->last_draw > 0.0) {
-        double dt = now - a->last_draw;
-        if (dt > 0.0) a->fps = a->fps > 0.0 ? 0.7 * a->fps + 0.3 * (1.0 / dt) : 1.0 / dt;
-      }
-      a->last_draw = now;
-      draw_scene(a, NULL);
-      update_title(a);
-      glfwSwapBuffers(a->win);
-      a->dirty = 0;
-      GLenum e = gl_check_error();
-      if (e != GL_NO_ERROR) fprintf(stderr, "GL error 0x%x in frame\n", (unsigned)e);
+
+    double now = glfwGetTime();
+    a->last_draw = now;
+    a->frames++;
+    win_frames++;
+
+    /* fps counts frames inside a time window: an EMA of per-frame dt drifts whenever the OS
+       wakes the loop early, so it can read higher than the frames actually swapped. */
+    double el = now - win_t;
+    if (el >= 0.5) {
+      a->fps = (double)win_frames / el;
+      win_frames = 0;
+      win_t = now;
     }
-    glfwWaitEventsTimeout(0.05);
+
+    draw_scene(a, NULL);
+    if (a->dirty) { update_title(a); a->dirty = 0; }
+    glfwSwapBuffers(a->win);
+    GLenum e = gl_check_error();
+    if (e != GL_NO_ERROR) fprintf(stderr, "GL error 0x%x in frame\n", (unsigned)e);
+
+    if (a->idle_report > 0.0 && now - t0 >= a->idle_report) {
+      printf("idle: %llu frames in %.2f s, fps %.1f\n", a->frames, now - t0, a->fps);
+      break;
+    }
   }
   return 0;
 }
@@ -1071,6 +1090,7 @@ static void usage(void) {
   printf("  viewer --ortho              orthographic (parallel rays); perspective is the default\n");
   printf("  viewer --fov <deg>          viewing angle, %.0f-%.0f (default %.0f)\n", FOV_MIN, FOV_MAX, DEFAULT_FOV);
   printf("  viewer --yaw <deg> --pitch <deg>  camera angles in degrees (for reproducible --render shots)\n");
+  printf("  viewer --idle-report <sec>   redraw with no input for N seconds, then print frames/fps\n");
   printf("window: wheel zoom | Ctrl+wheel or [ ] viewing angle | O perspective/ortho\n");
 }
 
@@ -1093,6 +1113,7 @@ int main(int argc, char** argv) {
   int fov_given = 0, ortho_req = 0;
   float yaw_req = 0.0f, pitch_req = 0.0f;
   int yaw_given = 0, pitch_given = 0;
+  double idle_report = 0.0; /* --idle-report <sec>, interactive mode only */
 
   /* Flags may appear anywhere, so positional arguments are collected in order:
      model, out, then an optional width/height pair. */
@@ -1119,6 +1140,12 @@ int main(int argc, char** argv) {
       fov_req = f;
       fov_given = 1;
     }
+    else if (strcmp(s, "--idle-report") == 0) {
+      if (i + 1 >= argc) { fprintf(stderr, "--idle-report needs a value\n"); usage(); return 2; }
+      double v = atof(argv[++i]);
+      if (!(v > 0.0)) { fprintf(stderr, "--idle-report %.2f must be > 0\n", v); return 2; }
+      idle_report = v;
+    }
     else if (strcmp(s, "--size") == 0 && i + 2 < argc) { w = atoi(argv[++i]); h = atoi(argv[++i]); }
     else if (s[0] == '-') { fprintf(stderr, "unknown option '%s'\n", s); usage(); return 2; }
     else if (npos < 4) pos[npos++] = s;
@@ -1135,6 +1162,7 @@ int main(int argc, char** argv) {
   }
 
   app a; memset(&a, 0, sizeof a);
+  a.idle_report = idle_report;
   a.wireframe = wire;
   a.fov_req = fov_req;
   a.fov_given = fov_given;
@@ -1142,6 +1170,11 @@ int main(int argc, char** argv) {
   a.yaw_req = yaw_req; a.yaw_given = yaw_given;
   a.pitch_req = pitch_req; a.pitch_given = pitch_given;
   a.width = w; a.height = h;
+
+  if (idle_report > 0.0 && (selftest || headless)) {
+    fprintf(stderr, "--idle-report works only in the interactive window\n");
+    return 2;
+  }
 
   if (!model && !selftest) {
     model = pick_default_model();
