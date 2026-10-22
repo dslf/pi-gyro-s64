@@ -81,7 +81,7 @@ work approved); Discovery-блокеры E0.T6/E4.T2/E6.T3/E6.T4/E7.T1 оста�
 
 | ID | История / Задача | Статус | Acceptance |
 |---|---|---|---|
-| E5.S1 | Понятный статус окна (fov, dist, проекция, FPS) | ✅ | окно + HUD: проекция, fov, dist, FPS, треугольники, выбор, wireframe (`src/main.c` → `hud_frame`) |
+| E5.S1 | Понятный статус окна (fov, dist, проекция, FPS) | ✅ | окно + HUD: проекция, fov, dist, FPS, треугольники, выбор, wireframe (`src/main.c` → `hud_frame`); интерактивный цикл рисует каждый кадр (HUD живой без ввода), `fps` = кадры за окно 0.5 с, диаг-флаг `--idle-report <sec>` |
 | E5.T5 | Dear ImGui (cimgui, C ABI) как основа HUD: FPS, подсказки горячих клавиш, читаемый контраст | ✅ | перенесено в продукт (`src/hud.c`, `deps/imgui/libcimgui.a`); профиль по умолчанию scale 1.0, панель 380×96; selftest: hud rect 8..388 × 8..104, ink coverage 13.00%, контраст 6.43:1 (WCAG AA), короткие штрихи 1470 против длинных 1, 0 px на повторном кадре |
 | E5.T6 | Сборка vendored `deps/imgui` (`libcimgui.a`) отдельным скриптом; продукт остаётся C11 | ✅ | `deps/imgui/build.ps1` (инкрементально, проверка exported C-символов), Makefile `imgui` target линкуется; продукт — C11 + `-static-libstdc++` |
 | E5.T1 | HUD: подсказки, выбранный треугольник (id/normals) | 🟡 | горячие клавиши и выбор (hover/pinned, face normals) в HUD есть; `id` треугольника — 🔵 следующий шаг |
