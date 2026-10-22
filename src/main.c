@@ -794,11 +794,13 @@ typedef struct {
   double ink_lum, ink_max, panel_lum, coverage, contrast;
   int diff_n;
   double cx, cy;             /* centroid of the differing pixels inside the rect */
+  int bx0, by0, bx1, by1;    /* bounding box of the ink; inverted when there is no ink */
 } panel_m;
 
 static void measure_panel(const unsigned char* base, const unsigned char* over, int w, int h,
                           const int* rect, const float bg[4], double bg_lum, panel_m* m) {
   memset(m, 0, sizeof *m);
+  m->bx0 = rect[2]; m->by0 = rect[3]; m->bx1 = rect[0]; m->by1 = rect[1];
   double ink_sum = 0, panel_sum = 0;
   long sx = 0, sy = 0;
   for (int y = rect[1]; y < rect[3] && y < h; y++) {
@@ -814,6 +816,10 @@ static void measure_panel(const unsigned char* base, const unsigned char* over, 
       if (l > panel_ref + 25.0) {
         ink_sum += l; m->ink_n++;
         if (l > m->ink_max) m->ink_max = l;
+        if (x < m->bx0) m->bx0 = x;
+        if (x > m->bx1) m->bx1 = x;
+        if (y < m->by0) m->by0 = y;
+        if (y > m->by1) m->by1 = y;
         run++;
       } else {
         panel_sum += l; m->panel_n++;
@@ -865,6 +871,7 @@ static void hud_selftest(app* a, int* fails) {
   static unsigned char px[960 * 320 * 4];
   static unsigned char px2[960 * 320 * 4];
   static unsigned char px3[960 * 320 * 4];
+  static unsigned char px4[960 * 320 * 4];
   camera_reset(&a->cam, a->mesh.fit);
 
   a->hud_overlay = 0;
@@ -999,6 +1006,73 @@ static void hud_selftest(app* a, int* fails) {
     (*fails)++;
   }
 
+  /* Tightness: the ink must reach within the window padding of every panel edge. A reserved
+     empty row or field would show up as a large gap between the ink box and the panel edge.
+     The help panel's right edge carries word-wrap slack (the last word of a wrapped line),
+     so it gets a wider budget. */
+  int gap[8] = { sm.bx0 - sx0, sx1 - sm.bx1, sm.by0 - sy0, sy1 - sm.by1,
+                 hm.bx0 - hx0, hx1 - hm.bx1, hm.by0 - hy0, hy1 - hm.by1 };
+  const char* gap_name[8] = { "stats left", "stats right", "stats top", "stats bottom",
+                              "help left", "help right", "help top", "help bottom" };
+  int gap_budget[8] = { 14, 14, 14, 14, 14, 80, 14, 14 };
+  int worst_gap = 0;
+  for (int i = 0; i < 8; i++) {
+    if (gap[i] > worst_gap) worst_gap = gap[i];
+    if (gap[i] > gap_budget[i]) {
+      printf("  FAIL %s edge reserves %d px of empty panel (ink box .. panel edge, budget %d px)\n",
+             gap_name[i], gap[i], gap_budget[i]);
+      (*fails)++;
+    }
+  }
+  printf("  ok   panels hug their text: worst empty gap %d px\n", worst_gap);
+
+  /* Empty-state proof: with nothing selected the statistics card must shrink - a row that is
+     not drawn must not be reserved. ImGui sizes an auto-resizing window from the *previous*
+     frame's content, so warm up with two frames before reading the rect. */
+  int save_hover = a->hover, save_locked = a->locked;
+  a->hover = -1;
+  a->locked = -1;
+  a->hud_overlay = 0;
+  draw_scene(a, &fb);            /* same scene, no HUD: the baseline for the ink count */
+  int qrc = fb_read_rgba(&fb, px4, err, sizeof err);
+  a->hud_overlay = 1;
+  draw_scene(a, &fb);
+  draw_scene(a, &fb);
+  qrc |= fb_read_rgba(&fb, px3, err, sizeof err);
+  a->hud_overlay = 0;
+  a->hover = save_hover;
+  a->locked = save_locked;
+  int qx0 = 0, qy0 = 0, qx1 = 0, qy1 = 0;
+  if (qrc != 0 || !hud_rect(&a->hudl, HUD_PANEL_STATS, &qx0, &qy0, &qx1, &qy1)) {
+    printf("  FAIL hud empty-state frame: %s\n", err);
+    (*fails)++;
+  } else {
+    int qrect[4] = { qx0, qy0, qx1, qy1 };
+    panel_m qm;
+    measure_panel(px4, px3, w, h, qrect, bgc, bg_lum, &qm);
+    int qgap[4] = { qm.bx0 - qx0, qx1 - qm.bx1, qm.by0 - qy0, qy1 - qm.by1 };
+    printf("  ok   stats with no selection: %d x %d px (was %d x %d), ink %ld px, "
+           "contrast %.2f:1, gaps L %d R %d T %d B %d px\n",
+           qx1 - qx0, qy1 - qy0, sx1 - sx0, sy1 - sy0, qm.ink_n, qm.contrast,
+           qgap[0], qgap[1], qgap[2], qgap[3]);
+    if ((qx1 - qx0) >= (sx1 - sx0) || (qy1 - qy0) >= (sy1 - sy0)) {
+      printf("  FAIL stats card does not shrink without a selection: %d x %d vs %d x %d px\n",
+             qx1 - qx0, qy1 - qy0, sx1 - sx0, sy1 - sy0);
+      (*fails)++;
+    }
+    if (qm.ink_n < 40 || qm.contrast < 4.5) {
+      printf("  FAIL stats empty-state ink %ld px, contrast %.2f:1 - the card must stay readable\n",
+             qm.ink_n, qm.contrast);
+      (*fails)++;
+    }
+    for (int i = 0; i < 4; i++) {
+      if (qgap[i] > 14) {
+        printf("  FAIL stats empty-state reserves %d px of empty panel (budget 14 px)\n", qgap[i]);
+        (*fails)++;
+      }
+    }
+  }
+
   /* Where the ink sits: statistics in the top-left half, help in the bottom half. */
   if (sm.cy >= h * 0.5 || sm.cx >= w * 0.5) {
     printf("  FAIL stats ink centroid (%.1f, %.1f) is outside the top-left half of %dx%d\n",
@@ -1104,6 +1178,19 @@ static void hud_selftest(app* a, int* fails) {
           printf("  FAIL narrow help contrast %.2f:1 is below WCAG AA 4.5:1\n", nm.contrast);
           (*fails)++;
         }
+        /* Tightness on the narrow frame too: wrapping must not leave empty rows. */
+        int ngap[4] = { nm.bx0 - nhx0, nhx1 - nm.bx1, nm.by0 - nhy0, nhy1 - nm.by1 };
+        const char* ngap_name[4] = { "left", "right", "top", "bottom" };
+        int ngap_budget[4] = { 14, 80, 14, 14 };
+        for (int i = 0; i < 4; i++) {
+          if (ngap[i] > ngap_budget[i]) {
+            printf("  FAIL narrow help %s edge reserves %d px of empty panel (budget %d px)\n",
+                   ngap_name[i], ngap[i], ngap_budget[i]);
+            (*fails)++;
+          }
+        }
+        printf("  ok   narrow help hugs its text: gaps L %d R %d T %d B %d px\n",
+               ngap[0], ngap[1], ngap[2], ngap[3]);
         if (nout != 0) {
           printf("  FAIL hud ink leaked outside both panel rects on a narrow frame: %ld px\n", nout);
           (*fails)++;

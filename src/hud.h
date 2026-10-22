@@ -30,9 +30,8 @@ typedef struct {
   int frames;              /* frames submitted to ImGui */
   int text_ready;          /* font atlas built: text is drawn from the 2nd frame on */
   float margin;            /* gap from the frame edge, pixels, for both panels */
-  float stats_w, stats_h;  /* statistics panel size in pixels (env-tunable) */
-  float help_w, help_h;    /* help panel size, measured from the hint text */
-  int help_h_fixed;        /* 1 = HUD_HELP_H pinned the height, else it follows wrapped text */
+  float stats_w;           /* >0 pins the stats width (HUD_W); 0 = the panel hugs its text */
+  float help_w;            /* help panel width cap, measured from the hint text; height follows the wrap */
   int stats_rect[4];       /* x0,y0,x1,y1 as ImGui drew it, pixel-y from the top */
   int help_rect[4];        /* same, for the help panel */
 } hud;
@@ -43,7 +42,8 @@ int  hud_init(hud* h, void* window, char* err, size_t errcap);
 void hud_shutdown(hud* h);
 
 /* Build both panels for this frame (ImGui NewFrame + widgets). Call before hud_render.
-   w/h are the framebuffer size in pixels; the help panel re-centres on every frame. */
+   w/h are the framebuffer size in pixels; both panels are auto-sized to their text and
+   re-positioned on every frame (stats top-left, help bottom-centre by pivot). */
 void hud_frame(hud* h, int w, int h_px, const hud_info* info);
 
 /* Submit the drawn panels to OpenGL. Does not swap buffers. */

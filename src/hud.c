@@ -12,13 +12,13 @@
 #include <string.h>
 
 /* Readability profile: ImGui glyphs at font scale 1 are far cleaner than the old GDI atlas.
-   Env overrides (HUD_FONT_SCALE, HUD_W, HUD_H) exist for tuning - the pixel selftest reports
-   WCAG contrast and ink coverage for whatever profile is in effect. */
+   Env overrides (HUD_FONT_SCALE, HUD_W, HUD_HELP_W) exist for tuning - the pixel selftest
+   reports WCAG contrast, ink coverage and the ink-to-panel-edge gap for whatever profile is
+   in effect. Heights are never set: each panel auto-fits its text, so there are no empty rows. */
 #define HUD_FONT_BASE 17.0f
 #define HUD_FONT_SCALE 1.0f
 #define HUD_MARGIN 8.0f
-#define HUD_STATS_W 380.0f
-#define HUD_STATS_H 96.0f
+#define HUD_STATS_W 0.0f    /* 0 = auto width; HUD_W pins it when set */
 #define HUD_HELP_MIN_W 300.0f   /* floor: width normally comes from the hint strings themselves */
 #define HUD_HELP_MAX_W 760.0f   /* ceiling: wider hints wrap into more lines, not a full-width bar */
 
@@ -37,15 +37,15 @@ static float env_f(const char* name, float fallback) {
   return x > 0.0f ? x : fallback;
 }
 
-/* Measure the help panel from the hint strings so the text is never clipped: the panel is
-   centred horizontally, so its width has to be known before Begin. */
-static void measure_help(float* w_out, float* h_out) {
+/* Width of the help panel from the hint strings: the panel is centred horizontally, so the
+   width has to be known before Begin. Height is left to ImGui (auto-fit), which also accounts
+   for wrapping at whatever width the frame allows. */
+static float measure_help_width(void) {
   const ImGuiStyle* st = igGetStyle();
   ImVec2 s1 = igCalcTextSize(HUD_HINT_KEYS, NULL, false, -1.0f);
   ImVec2 s2 = igCalcTextSize(HUD_HINT_PICK, NULL, false, -1.0f);
   float w = (s1.x > s2.x ? s1.x : s2.x) + st->WindowPadding.x * 2.0f;
-  *w_out = w > HUD_HELP_MIN_W ? w : HUD_HELP_MIN_W;
-  *h_out = s1.y + s2.y + st->ItemSpacing.y + st->WindowPadding.y * 2.0f;
+  return w > HUD_HELP_MIN_W ? w : HUD_HELP_MIN_W;
 }
 
 int hud_init(hud* h, void* window, char* err, size_t errcap) {
@@ -63,7 +63,6 @@ int hud_init(hud* h, void* window, char* err, size_t errcap) {
 
   const float scale = env_f("HUD_FONT_SCALE", HUD_FONT_SCALE);
   const float sw = env_f("HUD_STATS_W", HUD_STATS_W);
-  const float sh = env_f("HUD_STATS_H", HUD_STATS_H);
 
   ImGuiStyle* st = igGetStyle();
   igStyleColorsDark(st);
@@ -105,21 +104,15 @@ int hud_init(hud* h, void* window, char* err, size_t errcap) {
   igNewFrame();
   igEndFrame();
 
-  float hw = 0.0f, hh = 0.0f;
-  measure_help(&hw, &hh);
+  float hw = measure_help_width();
   if (hw > HUD_HELP_MAX_W) hw = HUD_HELP_MAX_W;
   hw = env_f("HUD_HELP_W", hw);
-  hh = env_f("HUD_HELP_H", hh);
 
   h->margin = HUD_MARGIN;
   h->stats_w = sw;
-  h->stats_h = sh;
   h->help_w = hw;
-  h->help_h = hh;
-  /* HUD_HELP_H pins the panel height; otherwise the height follows the wrapped hint text. */
-  h->help_h_fixed = getenv("HUD_HELP_H") != NULL;
-  printf("hud: imgui %s, font scale %.2f, stats %.0fx%.0f px, help %.0fx%.0f px\n",
-         igGetVersion(), scale, sw, sh, hw, hh);
+  printf("hud: imgui %s, font scale %.2f, stats width %s, help %.0f px wide (heights auto-fit)\n",
+         igGetVersion(), scale, sw > 0.0f ? "pinned by HUD_W" : "auto-fit to text", hw);
   return 0;
 }
 
@@ -135,14 +128,16 @@ void hud_shutdown(hud* h) {
   h->frames = 0;
 }
 
-/* A panel is a fixed-position, fixed-size info card: no title bar, no input focus, no
-   dragging. Position and size come from the hud profile. */
-static int begin_panel(const char* title, float x, float y, float pw, float ph) {
-  igSetNextWindowPos((ImVec2){ x, y }, ImGuiCond_Always, (ImVec2){ 0.0f, 0.0f });
-  igSetNextWindowSize((ImVec2){ pw, ph }, ImGuiCond_Always);
+/* An info card that hugs its text: no title bar, no input focus, no dragging, position pinned
+   by pivot (0,0 = top-left corner at the point, 0.5/1 = bottom-centre at the point). Width is
+   set by the API; a zero height component is not "set by API" for ImGui
+   (deps/imgui/imgui/imgui.cpp:7743), so AlwaysAutoResize fits the height to the text. */
+static int begin_panel(const char* title, float x, float y, float pw, float pivot_x, float pivot_y) {
+  igSetNextWindowPos((ImVec2){ x, y }, ImGuiCond_Always, (ImVec2){ pivot_x, pivot_y });
+  igSetNextWindowSize((ImVec2){ pw, 0.0f }, ImGuiCond_Always);
   if (!igBegin(title, NULL, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
-                                ImGuiWindowFlags_NoInputs))
+                                ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_AlwaysAutoResize))
     return 0;
   return 1;
 }
@@ -171,8 +166,8 @@ void hud_frame(hud* h, int w, int h_px, const hud_info* info) {
   io->DisplayFramebufferScale = (ImVec2){ 1.0f, 1.0f };
   igNewFrame();
 
-  /* Statistics panel: top-left, unchanged in position. */
-  if (begin_panel("hud_stats", h->margin, h->margin, h->stats_w, h->stats_h)) {
+  /* Statistics panel: pinned at the top-left corner, width fixed, height = the lines it has. */
+  if (begin_panel("hud_stats", h->margin, h->margin, h->stats_w, 0.0f, 0.0f)) {
     if (info) {
       char line[256];
       snprintf(line, sizeof line, "%s  fov %.0f deg  dist %.2f  fps %.1f",
@@ -198,23 +193,20 @@ void hud_frame(hud* h, int w, int h_px, const hud_info* info) {
     igEnd();
   }
 
-  /* Hotkey help: bottom-centre. Width comes from the hint text, capped to what the frame
-     can hold; height is the wrapped text height at that width, so a narrow frame gets a
-     taller panel instead of clipped text. The panel follows window resizes because
-     DisplaySize is re-set every frame. */
+  /* Hotkey help: bottom-centre, and the bottom edge is pinned by the pivot, so the auto-fit
+     height is ImGui's. Width comes from the hint text, capped to what the frame can hold; a
+     narrow frame wraps the hints into more lines instead of clipping them (ImGui does not
+     wrap by default - PushTextWrapPos(0) wraps at the window's content edge, which works
+     because the width here is set by the API). DisplaySize is re-set every frame, so the
+     panel follows window resizes. */
   float avail = (float)w - 2.0f * h->margin;
   float pw = h->help_w < avail ? h->help_w : avail;
   if (pw < 64.0f) pw = 64.0f;
-  const ImGuiStyle* st = igGetStyle();
-  float inner = pw - st->WindowPadding.x * 2.0f;
-  ImVec2 s1 = igCalcTextSize(HUD_HINT_KEYS, NULL, false, inner);
-  ImVec2 s2 = igCalcTextSize(HUD_HINT_PICK, NULL, false, inner);
-  float ph = h->help_h_fixed ? h->help_h
-                              : s1.y + s2.y + st->ItemSpacing.y + st->WindowPadding.y * 2.0f;
-  if (begin_panel("hud_help", ((float)w - pw) * 0.5f,
-                  (float)h_px - h->margin - ph, pw, ph)) {
+  if (begin_panel("hud_help", (float)w * 0.5f, (float)h_px - h->margin, pw, 0.5f, 1.0f)) {
+    igPushTextWrapPos(0.0f);
     igTextUnformatted(HUD_HINT_KEYS, NULL);
     igTextUnformatted(HUD_HINT_PICK, NULL);
+    igPopTextWrapPos();
     record_rect(h->help_rect);
     igEnd();
   }
