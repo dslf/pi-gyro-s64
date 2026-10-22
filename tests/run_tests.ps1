@@ -10,11 +10,11 @@ Get-ChildItem $Out -Filter *.bmp -ErrorAction SilentlyContinue | Remove-Item -Fo
 function Fail($msg) { $script:fails++; Write-Output "FAIL $msg" }
 function Ok($msg)   { Write-Output "ok   $msg" }
 
-# Run viewer.exe with a verbatim argument string; capture stdout+stderr and exit code.
+# Run build\viewer.exe with a verbatim argument string; capture stdout+stderr and exit code.
 function Run-Viewer([string]$cmdline) {
   $so = [System.IO.Path]::GetTempFileName()
   $se = [System.IO.Path]::GetTempFileName()
-  $p = Start-Process -FilePath ".\viewer.exe" -ArgumentList $cmdline -NoNewWindow -Wait -PassThru `
+  $p = Start-Process -FilePath ".\build\viewer.exe" -ArgumentList $cmdline -NoNewWindow -Wait -PassThru `
         -RedirectStandardOutput $so -RedirectStandardError $se
   $out = ((Get-Content $so -Raw) + (Get-Content $se -Raw)).Trim()
   Remove-Item $so, $se -Force -ErrorAction SilentlyContinue

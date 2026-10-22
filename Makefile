@@ -8,7 +8,9 @@ SRC = src/main.c src/gl.c src/vmath.c src/camera.c src/obj.c src/mesh.c \
 HDR = src/gl.h src/vmath.h src/obj.h src/mesh.h src/camera.h src/render.h src/img.h src/hud.h
 SH  = shaders/model.vert shaders/model.frag
 
-all: viewer.exe
+OUT = build
+
+all: $(OUT)/viewer.exe
 
 imgui: $(IMGUI)
 
@@ -16,14 +18,17 @@ imgui: $(IMGUI)
 $(IMGUI): deps/imgui/build.ps1 deps/imgui/cimgui.cpp deps/imgui/cimgui.h
 	powershell -NoProfile -ExecutionPolicy Bypass -File deps/imgui/build.ps1
 
-viewer.exe: $(SRC) $(HDR) $(SH) $(IMGUI)
+# Binaries live in build/ (git-ignored); the directory is created on demand so the
+# Makefile stays portable (sh on POSIX, sh on Windows via GNU Make 4.4).
+$(OUT)/viewer.exe: $(SRC) $(HDR) $(SH) $(IMGUI)
+	mkdir -p $(OUT)
 	$(CC) $(CFLAGS) $(SRC) -o $@ $(IMGUI) $(LDFLAGS)
 
-test: viewer.exe
+test: $(OUT)/viewer.exe
 	powershell -NoProfile -ExecutionPolicy Bypass -File tests/run_tests.ps1
 
 clean:
-	rm -f viewer.exe out_*.bmp screenshot.bmp
+	rm -f $(OUT)/viewer.exe out_*.bmp screenshot.bmp
 	rm -rf deps/imgui/build
 
 .PHONY: all imgui test clean
