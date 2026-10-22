@@ -11,6 +11,7 @@ tests/out/
 trash/
 *.bmp
 *.png
+!docs/*.png
 *.log
 screenshot.bmp
 
