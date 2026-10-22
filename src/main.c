@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <sys/stat.h>
 
 #define VERT_SHADER "shaders/model.vert"
@@ -198,7 +199,7 @@ static void draw_scene(app* a, const framebuffer* fb) {
   renderer_draw(&a->rend, &a->mesh, &vp, &model, &nmat, eye, a->wireframe);
   my_glDisable(GL_DEPTH_TEST);
 
-  /* HUD overlay: camera state, the picked triangle and the hotkeys, top-left in pixel space. */
+  /* HUD: statistics panel top-left, hotkey help panel bottom-centre (both in pixel space). */
   if (a->hud_overlay) {
     int sel = a->locked >= 0 ? a->locked : a->hover;
     hud_info info;
@@ -210,6 +211,25 @@ static void draw_scene(app* a, const framebuffer* fb) {
     info.pinned = a->locked >= 0;
     info.wireframe = a->wireframe;
     info.fps = a->fps;
+    info.hovered = a->hover;
+    info.pin_nx = info.pin_ny = info.pin_nz = 0.0f;
+    info.pin_cx = info.pin_cy = info.pin_cz = 0.0f;
+    if (sel >= 0 && sel < a->cpu.triangles && a->cpu.v) {
+      const float* v = a->cpu.v + (size_t)sel * 24;   /* 3 vertices, stride 8 */
+      info.pin_cx = (v[0] + v[8] + v[16]) / 3.0f;
+      info.pin_cy = (v[1] + v[9] + v[17]) / 3.0f;
+      info.pin_cz = (v[2] + v[10] + v[18]) / 3.0f;
+      if (a->cpu.flags & OBJ_HAS_NORMALS) {
+        info.pin_nx = v[3]; info.pin_ny = v[4]; info.pin_nz = v[5];
+      } else {
+        float e1[3] = { v[8] - v[0], v[9] - v[1], v[10] - v[2] };
+        float e2[3] = { v[16] - v[0], v[17] - v[1], v[18] - v[2] };
+        float n[3] = { e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2],
+                       e1[0] * e2[1] - e1[1] * e2[0] };
+        float len = (float)sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        if (len > 1e-6f) { info.pin_nx = n[0] / len; info.pin_ny = n[1] / len; info.pin_nz = n[2] / len; }
+      }
+    }
     hud_frame(&a->hudl, w, h, &info);
     hud_render(&a->hudl);
   }
@@ -750,22 +770,6 @@ static int region_diff_count(const unsigned char* a, const unsigned char* b, int
   return n;
 }
 
-/* Centroid of every differing pixel: tells where the HUD landed without guessing. */
-static void diff_centroid(const unsigned char* a, const unsigned char* b, int w, int h, int tol,
-                          int* count, double* cx, double* cy) {
-  long sx = 0, sy = 0, n = 0;
-  for (int y = 0; y < h; y++)
-    for (int x = 0; x < w; x++) {
-      const unsigned char* p = a + ((size_t)y * w + x) * 4;
-      const unsigned char* q = b + ((size_t)y * w + x) * 4;
-      int dr = p[0] - q[0], dg = p[1] - q[1], db = p[2] - q[2];
-      if (dr * dr + dg * dg + db * db > tol * tol) { sx += x; sy += y; n++; }
-    }
-  *count = (int)n;
-  *cx = n ? (double)sx / (double)n : 0.0;
-  *cy = n ? (double)sy / (double)n : 0.0;
-}
-
 /* Perceptual helpers for HUD readability: relative luminance, sRGB linearisation and the
    WCAG contrast ratio. All thresholds are relative so another GPU/AA path still passes. */
 static double lum3(unsigned r, unsigned g, unsigned b) {
@@ -782,13 +786,75 @@ static double wcag_ratio(double a, double b) {
   return (la + 0.05) / (lb + 0.05);
 }
 
-/* The HUD is the overlay, so it is measured against the same scene drawn without it:
-   every differing pixel is HUD ink. Position, coverage, stroke structure, orientation
-   and determinism are all numeric, so a flipped or slab-like glyph cannot pass. */
+/* One panel measured against the same scene drawn without the HUD. Ink is any pixel that is
+   brighter than the panel level the blend produced at that pixel; coverage, contrast and
+   glyph-run lengths are all relative so another GPU/AA path still passes. */
+typedef struct {
+  long ink_n, panel_n, short_runs, long_runs;
+  double ink_lum, ink_max, panel_lum, coverage, contrast;
+  int diff_n;
+  double cx, cy;             /* centroid of the differing pixels inside the rect */
+} panel_m;
+
+static void measure_panel(const unsigned char* base, const unsigned char* over, int w, int h,
+                          const int* rect, const float bg[4], double bg_lum, panel_m* m) {
+  memset(m, 0, sizeof *m);
+  double ink_sum = 0, panel_sum = 0;
+  long sx = 0, sy = 0;
+  for (int y = rect[1]; y < rect[3] && y < h; y++) {
+    int run = 0;
+    for (int x = rect[0]; x < rect[2] && x < w; x++) {
+      const unsigned char* p = base + ((size_t)y * w + x) * 4;
+      const unsigned char* q = over + ((size_t)y * w + x) * 4;
+      int dr = p[0] - q[0], dg = p[1] - q[1], db = p[2] - q[2];
+      if (dr * dr + dg * dg + db * db > 8 * 8) { sx += x; sy += y; m->diff_n++; }
+      double scene = lum3(p[2], p[1], p[0]);
+      double panel_ref = bg[3] * bg_lum + (1.0 - bg[3]) * scene;
+      double l = lum3(q[2], q[1], q[0]);
+      if (l > panel_ref + 25.0) {
+        ink_sum += l; m->ink_n++;
+        if (l > m->ink_max) m->ink_max = l;
+        run++;
+      } else {
+        panel_sum += l; m->panel_n++;
+        if (run > 0) { if (run <= 12) m->short_runs++; else m->long_runs++; run = 0; }
+      }
+    }
+    if (run > 0) { if (run <= 12) m->short_runs++; else m->long_runs++; }
+  }
+  m->panel_lum = m->panel_n ? panel_sum / (double)m->panel_n : 0.0;
+  m->ink_lum = m->ink_n ? ink_sum / (double)m->ink_n : 0.0;
+  double area = (double)(rect[2] - rect[0]) * (double)(rect[3] - rect[1]);
+  m->coverage = area > 0 ? 100.0 * (double)m->ink_n / area : 0.0;
+  m->contrast = wcag_ratio(m->ink_lum, m->panel_lum);
+  m->cx = m->diff_n ? (double)sx / (double)m->diff_n : 0.0;
+  m->cy = m->diff_n ? (double)sy / (double)m->diff_n : 0.0;
+}
+
+/* Pixels changed outside both panels: the overlay must not touch anything else. */
+static long outside_panels_diff(const unsigned char* base, const unsigned char* over, int w, int h,
+                                const int* r1, const int* r2, int tol) {
+  long n = 0;
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++) {
+      if (x >= r1[0] && x < r1[2] && y >= r1[1] && y < r1[3]) continue;
+      if (x >= r2[0] && x < r2[2] && y >= r2[1] && y < r2[3]) continue;
+      const unsigned char* p = base + ((size_t)y * w + x) * 4;
+      const unsigned char* q = over + ((size_t)y * w + x) * 4;
+      int dr = p[0] - q[0], dg = p[1] - q[1], db = p[2] - q[2];
+      if (dr * dr + dg * dg + db * db > tol * tol) n++;
+    }
+  return n;
+}
+
+
+/* Both panels are measured separately against the same scene drawn without the HUD, so every
+   differing pixel is HUD ink. Layout, ink containment, coverage, contrast, stroke structure
+   and determinism are all numeric: a misplaced, slab-like or flipped glyph cannot pass. */
 static void hud_selftest(app* a, int* fails) {
-  printf("selftest: HUD overlay\n");
+  printf("selftest: HUD overlay (stats top-left, hotkey help bottom-centre)\n");
   char err[256] = "";
-  const int w = 560, h = 240;   /* large enough to hold the whole HUD panel */
+  const int w = 960, h = 320;   /* wide enough for the hint lines, tall enough for both panels */
   framebuffer fb;
   if (fb_create(&fb, w, h, err, sizeof err) < 0) {
     printf("  FAIL hud framebuffer: %s\n", err);
@@ -796,9 +862,9 @@ static void hud_selftest(app* a, int* fails) {
     return;
   }
 
-  static unsigned char px[560 * 240 * 4];
-  static unsigned char px2[560 * 240 * 4];
-  static unsigned char px3[560 * 240 * 4];
+  static unsigned char px[960 * 320 * 4];
+  static unsigned char px2[960 * 320 * 4];
+  static unsigned char px3[960 * 320 * 4];
   camera_reset(&a->cam, a->mesh.fit);
 
   a->hud_overlay = 0;
@@ -821,20 +887,61 @@ static void hud_selftest(app* a, int* fails) {
     return;
   }
 
-  int n = 0;
-  double cx = 0.0, cy = 0.0;
-  diff_centroid(px, px2, w, h, 8, &n, &cx, &cy);
-  if (n < 40) {
-    printf("  FAIL HUD changed only %d pixels - overlay is not visible\n", n);
+  int sx0 = 0, sy0 = 0, sx1 = 0, sy1 = 0, hx0 = 0, hy0 = 0, hx1 = 0, hy1 = 0;
+  if (!hud_rect(&a->hudl, HUD_PANEL_STATS, &sx0, &sy0, &sx1, &sy1)) {
+    printf("  FAIL hud stats panel rect unknown - ImGui drew nothing\n");
+    (*fails)++;
+    fb_free(&fb);
+    return;
+  }
+  if (!hud_rect(&a->hudl, HUD_PANEL_HELP, &hx0, &hy0, &hx1, &hy1)) {
+    printf("  FAIL hud help panel rect unknown - ImGui drew nothing\n");
+    (*fails)++;
+    fb_free(&fb);
+    return;
+  }
+  int stats_rect[4] = { sx0, sy0, sx1, sy1 };
+  int help_rect[4] = { hx0, hy0, hx1, hy1 };
+  printf("  ok   stats rect %d..%d x %d..%d (%d x %d px)\n", sx0, sx1, sy0, sy1,
+         sx1 - sx0, sy1 - sy0);
+  printf("  ok   help rect %d..%d x %d..%d (%d x %d px)\n", hx0, hx1, hy0, hy1,
+         hx1 - hx0, hy1 - hy0);
+
+  /* Layout: statistics keeps the top-left corner, help is centred horizontally and sits on
+     the bottom margin; the panels must stay inside the frame and not overlap each other. */
+  if (sx0 > 12 || sy0 > 12) {
+    printf("  FAIL stats panel at (%d, %d) - not the top-left corner\n", sx0, sy0);
     (*fails)++;
   } else {
-    printf("  ok   HUD ink: %d pixels of %dx%d (%.2f%% of frame)\n", n, w, h, 100.0 * n / (double)(w * h));
-    if (cy >= h * 0.5 || cx >= w * 0.5) {
-      printf("  FAIL HUD centroid (%.1f, %.1f) is outside the top-left half of %dx%d\n", cx, cy, w, h);
-      (*fails)++;
-    } else {
-      printf("  ok   HUD centroid (%.1f, %.1f) sits top-left\n", cx, cy);
-    }
+    printf("  ok   stats pinned top-left at (%d, %d)\n", sx0, sy0);
+  }
+
+  double help_cx = (hx0 + hx1) * 0.5;
+  double centre_off = fabs(help_cx - w * 0.5);
+  if (centre_off > w * 0.02) {
+    printf("  FAIL help panel centre x %.1f is %.1f px from the frame centre %.1f\n",
+           help_cx, centre_off, w * 0.5);
+    (*fails)++;
+  } else {
+    printf("  ok   help centred: centre x %.1f, off by %.1f px (%.2f%% of width)\n",
+           help_cx, centre_off, 100.0 * centre_off / (double)w);
+  }
+
+  double bottom_gap = (double)h - (double)hy1;
+  if (fabs(bottom_gap - (double)a->hudl.margin) > 6.0) {
+    printf("  FAIL help panel bottom edge %d, gap to frame edge %.1f px (margin %.1f)\n",
+           hy1, bottom_gap, (double)a->hudl.margin);
+    (*fails)++;
+  } else {
+    printf("  ok   help sits on the bottom margin: edge %d, gap %.1f px\n", hy1, bottom_gap);
+  }
+
+  if (hx0 < 0 || hx1 > w || sy1 > hy0) {
+    printf("  FAIL panels overlap or leave the frame (stats ..%d, help %d..%d of %d)\n",
+           sy1, hx0, hx1, w);
+    (*fails)++;
+  } else {
+    printf("  ok   panels disjoint: %d px gap between them\n", hy0 - sy1);
   }
 
   /* Determinism: the same frame twice must produce identical HUD pixels. */
@@ -845,19 +952,6 @@ static void hud_selftest(app* a, int* fails) {
   } else {
     printf("  ok   HUD layout is deterministic (0 pixels moved on redraw)\n");
   }
-
-  /* The panel rect ImGui reported is the measurement box: ink must stay inside it, and it
-     must be classified against the panel the overlay blended over. */
-  int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
-  if (!hud_rect(&a->hudl, &x0, &y0, &x1, &y1)) {
-    printf("  FAIL hud panel rect unknown - ImGui drew nothing\n");
-    (*fails)++;
-    fb_free(&fb);
-    return;
-  }
-  if (x1 > w) x1 = w;
-  if (y1 > h) y1 = h;
-  printf("  ok   hud rect %d..%d x %d..%d (%d x %d px)\n", x0, x1, y0, y1, x1 - x0, y1 - y0);
 
   float bgc[4], txtc[4];
   hud_colors(&a->hudl, bgc, txtc);
@@ -873,81 +967,159 @@ static void hud_selftest(app* a, int* fails) {
     (*fails)++;
   }
 
-  /* Per pixel reference: the panel blends over whatever the scene had at that pixel, so the
-     panel level is computed from the base frame instead of a constant. */
-  double panel_sum = 0, ink_sum = 0;
-  long ink_n = 0, panel_n = 0, outside_n = 0;
-  double ink_max = 0;
-  for (int y = 0; y < h; y++) {
-    for (int x = 0; x < w; x++) {
-      const unsigned char* p = px + ((size_t)y * w + x) * 4;
-      const unsigned char* q = px2 + ((size_t)y * w + x) * 4;
-      double scene = lum3(p[2], p[1], p[0]);
-      double panel_ref = bgc[3] * bg_lum + (1.0 - bgc[3]) * scene;
-      double l = lum3(q[2], q[1], q[0]);
-      if (x >= x0 && x < x1 && y >= y0 && y < y1) {
-        if (l > panel_ref + 25.0) {
-          ink_sum += l; ink_n++;
-          if (l > ink_max) ink_max = l;
-        } else {
-          panel_sum += l; panel_n++;
-        }
-      } else {
-        int dr = p[2] - q[2], dg = p[1] - q[1], db = p[0] - q[0];
-        if (dr * dr + dg * dg + db * db > 8 * 8) outside_n++;
-      }
-    }
-  }
-  double panel_lum = panel_n ? panel_sum / (double)panel_n : 0;
-  double ink_lum = ink_n ? ink_sum / (double)ink_n : 0;
-  double area = (double)(x1 - x0) * (double)(y1 - y0);
-  double coverage = area > 0 ? 100.0 * (double)ink_n / area : 0.0;
-  double contrast = wcag_ratio(ink_lum, panel_lum);
-  printf("  ok   hud ink mean lum %.1f (max %.1f), panel mean lum %.1f\n", ink_lum, ink_max, panel_lum);
-  printf("  ok   hud ink coverage %.2f%% of panel, contrast %.2f:1 (WCAG)\n", coverage, contrast);
+  panel_m sm, hm;
+  measure_panel(px, px2, w, h, stats_rect, bgc, bg_lum, &sm);
+  measure_panel(px, px2, w, h, help_rect, bgc, bg_lum, &hm);
+  printf("  ok   stats ink %ld px of %d x %d, coverage %.2f%%, ink lum %.1f (max %.1f), "
+         "panel lum %.1f, contrast %.2f:1, centroid (%.1f, %.1f)\n",
+         sm.ink_n, sx1 - sx0, sy1 - sy0, sm.coverage, sm.ink_lum, sm.ink_max, sm.panel_lum,
+         sm.contrast, sm.cx, sm.cy);
+  printf("  ok   help ink %ld px of %d x %d, coverage %.2f%%, ink lum %.1f (max %.1f), "
+         "panel lum %.1f, contrast %.2f:1, centroid (%.1f, %.1f)\n",
+         hm.ink_n, hx1 - hx0, hy1 - hy0, hm.coverage, hm.ink_lum, hm.ink_max, hm.panel_lum,
+         hm.contrast, hm.cx, hm.cy);
 
-  if (ink_n < 40) {
-    printf("  FAIL hud ink: %ld pixels - overlay is not visible\n", ink_n);
+  if (sm.ink_n < 40 || hm.ink_n < 40) {
+    printf("  FAIL hud ink: stats %ld px, help %ld px - an overlay panel is not visible\n",
+           sm.ink_n, hm.ink_n);
     (*fails)++;
   }
-  if (coverage > 45.0) {
-    printf("  FAIL hud ink covers %.2f%% of the panel - a slab, not glyphs\n", coverage);
+  if (sm.coverage > 45.0 || hm.coverage > 45.0) {
+    printf("  FAIL hud ink covers stats %.2f%% / help %.2f%% of its panel - a slab, not glyphs\n",
+           sm.coverage, hm.coverage);
     (*fails)++;
   }
-  /* Readability floor: WCAG AA for body text is 4.5:1; the profile from lab/imgui is ~6.8:1. */
-  if (contrast < 4.5) {
-    printf("  FAIL hud text contrast %.2f:1 is below WCAG AA 4.5:1\n", contrast);
+  /* Readability floor: WCAG AA for body text is 4.5:1. */
+  if (sm.contrast < 4.5) {
+    printf("  FAIL stats text contrast %.2f:1 is below WCAG AA 4.5:1\n", sm.contrast);
     (*fails)++;
   }
-  if (outside_n != 0) {
-    printf("  FAIL hud ink leaked outside its panel rect: %ld pixels\n", outside_n);
+  if (hm.contrast < 4.5) {
+    printf("  FAIL help text contrast %.2f:1 is below WCAG AA 4.5:1\n", hm.contrast);
     (*fails)++;
+  }
+
+  /* Where the ink sits: statistics in the top-left half, help in the bottom half. */
+  if (sm.cy >= h * 0.5 || sm.cx >= w * 0.5) {
+    printf("  FAIL stats ink centroid (%.1f, %.1f) is outside the top-left half of %dx%d\n",
+           sm.cx, sm.cy, w, h);
+    (*fails)++;
+  } else {
+    printf("  ok   stats ink centroid (%.1f, %.1f) sits top-left\n", sm.cx, sm.cy);
+  }
+  if (hm.cy < h * 0.5) {
+    printf("  FAIL help ink centroid y %.1f is outside the bottom half of %d\n", hm.cy, h);
+    (*fails)++;
+  } else {
+    printf("  ok   help ink centroid (%.1f, %.1f) sits bottom-centre\n", hm.cx, hm.cy);
+  }
+
+  long outside = outside_panels_diff(px, px2, w, h, stats_rect, help_rect, 8);
+  if (outside != 0) {
+    printf("  FAIL hud ink leaked outside both panel rects: %ld pixels\n", outside);
+    (*fails)++;
+  } else {
+    printf("  ok   hud ink confined to the two panel rects (0 pixels outside)\n");
   }
 
   /* Stroke structure: glyph strokes are short runs; a solid bar would give long runs. */
-  long short_runs = 0, long_runs = 0;
-  for (int y = y0; y < y1; y++) {
-    int run = 0;
-    for (int x = x0; x < x1; x++) {
-      const unsigned char* p = px + ((size_t)y * w + x) * 4;
-      const unsigned char* q = px2 + ((size_t)y * w + x) * 4;
-      double scene = lum3(p[2], p[1], p[0]);
-      double panel_ref = bgc[3] * bg_lum + (1.0 - bgc[3]) * scene;
-      if (lum3(q[2], q[1], q[0]) > panel_ref + 25.0) run++;
-      else if (run > 0) { if (run <= 12) short_runs++; else long_runs++; run = 0; }
+  printf("  ok   stats runs: short(<=12px)=%ld long(>12px)=%ld\n", sm.short_runs, sm.long_runs);
+  printf("  ok   help runs: short(<=12px)=%ld long(>12px)=%ld\n", hm.short_runs, hm.long_runs);
+  if (sm.short_runs < 20 || hm.short_runs < 20) {
+    printf("  FAIL hud glyph runs: stats %ld, help %ld short runs - text is not drawn\n",
+           sm.short_runs, hm.short_runs);
+    (*fails)++;
+  }
+  if (sm.long_runs > sm.short_runs || hm.long_runs > hm.short_runs) {
+    printf("  FAIL hud ink dominated by long runs (stats %ld/%ld, help %ld/%ld) - solid bars\n",
+           sm.long_runs, sm.short_runs, hm.long_runs, hm.short_runs);
+    (*fails)++;
+  }
+
+  /* A narrow frame must wrap the hints rather than clip them: the help panel caps to the
+     frame width and grows vertically. Same checks on a 420 px wide frame. */
+  framebuffer narrow;
+  if (fb_create(&narrow, 420, 320, err, sizeof err) < 0) {
+    printf("  FAIL hud narrow framebuffer: %s\n", err);
+    (*fails)++;
+  } else {
+    const int nw = 420, nh = 320;
+    camera_reset(&a->cam, a->mesh.fit);
+    a->hud_overlay = 0;
+    draw_scene(a, &narrow);
+    int nrc = fb_read_rgba(&narrow, px, err, sizeof err);
+    a->hud_overlay = 1;
+    draw_scene(a, &narrow);
+    draw_scene(a, &narrow);
+    draw_scene(a, &narrow);
+    nrc |= fb_read_rgba(&narrow, px2, err, sizeof err);
+    a->hud_overlay = 0;
+    if (nrc != 0) {
+      printf("  FAIL hud narrow readback: %s\n", err);
+      (*fails)++;
+    } else {
+      int nsx0, nsy0, nsx1, nsy1, nhx0, nhy0, nhx1, nhy1;
+      if (!hud_rect(&a->hudl, HUD_PANEL_STATS, &nsx0, &nsy0, &nsx1, &nsy1) ||
+          !hud_rect(&a->hudl, HUD_PANEL_HELP, &nhx0, &nhy0, &nhx1, &nhy1)) {
+        printf("  FAIL hud panels missing on a %dx%d frame\n", nw, nh);
+        (*fails)++;
+      } else {
+        int nstats[4] = { nsx0, nsy0, nsx1, nsy1 };
+        int nhelp[4] = { nhx0, nhy0, nhx1, nhy1 };
+        printf("  ok   narrow frame %dx%d: stats %d..%d x %d..%d, help %d..%d x %d..%d\n",
+               nw, nh, nsx0, nsx1, nsy0, nsy1, nhx0, nhx1, nhy0, nhy1);
+        double ncentre = (nhx0 + nhx1) * 0.5;
+        if (nhx0 < 0 || nhx1 > nw) {
+          printf("  FAIL narrow help panel %d..%d leaves the %d px frame\n", nhx0, nhx1, nw);
+          (*fails)++;
+        } else if (fabs(ncentre - nw * 0.5) > nw * 0.02) {
+          printf("  FAIL narrow help centre x %.1f is %.1f px from the frame centre %.1f\n",
+                 ncentre, fabs(ncentre - nw * 0.5), nw * 0.5);
+          (*fails)++;
+        } else if (fabs((double)nh - (double)nhy1 - (double)a->hudl.margin) > 6.0) {
+          printf("  FAIL narrow help bottom edge %d (frame %d, margin %.1f)\n",
+                 nhy1, nh, (double)a->hudl.margin);
+          (*fails)++;
+        } else if (nsy1 > nhy0) {
+          printf("  FAIL narrow panels overlap (stats ..%d, help from %d)\n", nsy1, nhy0);
+          (*fails)++;
+        } else {
+          printf("  ok   narrow help stays centred and on the bottom margin, %d px below stats\n",
+                 nhy0 - nsy1);
+        }
+        panel_m nm;
+        measure_panel(px, px2, nw, nh, nhelp, bgc, bg_lum, &nm);
+        long nout = outside_panels_diff(px, px2, nw, nh, nstats, nhelp, 8);
+        printf("  ok   narrow help ink %ld px of %d x %d, coverage %.2f%%, contrast %.2f:1\n",
+               nm.ink_n, nhx1 - nhx0, nhy1 - nhy0, nm.coverage, nm.contrast);
+        if (nm.coverage > 45.0) {
+          printf("  FAIL narrow help ink covers %.2f%% of its panel - a slab, not glyphs\n", nm.coverage);
+          (*fails)++;
+        }
+        if (nm.ink_n < 40) {
+          printf("  FAIL narrow help ink %ld px - hints are clipped away\n", nm.ink_n);
+          (*fails)++;
+        }
+        if (nm.contrast < 4.5) {
+          printf("  FAIL narrow help contrast %.2f:1 is below WCAG AA 4.5:1\n", nm.contrast);
+          (*fails)++;
+        }
+        if (nout != 0) {
+          printf("  FAIL hud ink leaked outside both panel rects on a narrow frame: %ld px\n", nout);
+          (*fails)++;
+        }
+        /* Wrapping proof: the narrow panel is taller than the wide one and narrower. */
+        if ((nhx1 - nhx0) < (hx1 - hx0) && (nhy1 - nhy0) > (hy1 - hy0)) {
+          printf("  ok   hints wrap: %d x %d -> %d x %d px (narrower, taller)\n",
+                 hx1 - hx0, hy1 - hy0, nhx1 - nhx0, nhy1 - nhy0);
+        } else {
+          printf("  FAIL narrow help %d x %d did not wrap from %d x %d\n",
+                 nhx1 - nhx0, nhy1 - nhy0, hx1 - hx0, hy1 - hy0);
+          (*fails)++;
+        }
+      }
+      fb_free(&narrow);
     }
-    if (run > 0) { if (run <= 12) short_runs++; else long_runs++; }
-  }
-  printf("  ok   ink runs: short(<=12px)=%ld long(>12px)=%ld, ratio %.2f\n", short_runs, long_runs,
-         long_runs ? (double)short_runs / (double)long_runs : 99.0);
-  if (short_runs < 20) {
-    printf("  FAIL hud has %ld short glyph runs - text is not drawn\n", short_runs);
-    (*fails)++;
-  }
-  if (long_runs > short_runs) {
-    printf("  FAIL hud ink is dominated by long runs (%ld vs %ld) - solid bars, not glyphs\n",
-           long_runs, short_runs);
-    (*fails)++;
   }
 
   fb_free(&fb);

@@ -7,6 +7,9 @@
    every C++ symbol is hidden behind this header. hud.c owns the ImGui context and the
    GLFW/OpenGL3 backends; the caller supplies only data. */
 
+#define HUD_PANEL_STATS 0   /* camera / triangles / selection - top-left */
+#define HUD_PANEL_HELP  1   /* hotkey hints - bottom-centre */
+
 typedef struct {
   const char* projection;  /* "persp" | "ortho" */
   float fov_deg;
@@ -16,16 +19,22 @@ typedef struct {
   int pinned;              /* 1 = selection pinned by a click, 0 = hover */
   int wireframe;
   double fps;              /* measured frames/second; 0 = not measured yet */
+  int hovered;             /* triangle under the cursor, -1 = none */
+  float pin_nx, pin_ny, pin_nz;   /* normal of the selected face */
+  float pin_cx, pin_cy, pin_cz;   /* centroid of the selected face, model space */
 } hud_info;
 
 typedef struct {
   void* ctx;               /* ImGuiContext* (opaque here) */
   int backends;            /* 1 = GLFW + OpenGL3 backends initialised */
   int frames;              /* frames submitted to ImGui */
-  int rect[4];             /* last panel rect in pixel space: x0,y0,x1,y1 (top-left origin) */
   int text_ready;          /* font atlas built: text is drawn from the 2nd frame on */
-  float margin;            /* panel offset from the top-left corner, in pixels */
-  float panel_w, panel_h;  /* requested panel size in pixels (env-tunable) */
+  float margin;            /* gap from the frame edge, pixels, for both panels */
+  float stats_w, stats_h;  /* statistics panel size in pixels (env-tunable) */
+  float help_w, help_h;    /* help panel size, measured from the hint text */
+  int help_h_fixed;        /* 1 = HUD_HELP_H pinned the height, else it follows wrapped text */
+  int stats_rect[4];       /* x0,y0,x1,y1 as ImGui drew it, pixel-y from the top */
+  int help_rect[4];        /* same, for the help panel */
 } hud;
 
 /* Initialise ImGui + backends on an existing GLFW window. Returns 0 on success,
@@ -33,17 +42,18 @@ typedef struct {
 int  hud_init(hud* h, void* window, char* err, size_t errcap);
 void hud_shutdown(hud* h);
 
-/* Build the panel content for this frame (ImGui NewFrame + widgets). Call before
-   hud_render. w/h are the framebuffer size in pixels. */
+/* Build both panels for this frame (ImGui NewFrame + widgets). Call before hud_render.
+   w/h are the framebuffer size in pixels; the help panel re-centres on every frame. */
 void hud_frame(hud* h, int w, int h_px, const hud_info* info);
 
-/* Submit the drawn panel to OpenGL. Does not swap buffers. */
+/* Submit the drawn panels to OpenGL. Does not swap buffers. */
 void hud_render(hud* h);
 
-/* Panel rect of the last frame; returns 0 if nothing was drawn yet. */
-int  hud_rect(const hud* h, int* x0, int* y0, int* x1, int* y1);
+/* Rect of one panel as ImGui drew it (HUD_PANEL_STATS / HUD_PANEL_HELP), in pixels with
+   pixel-y from the top. Returns 0 if that panel was not drawn yet. */
+int  hud_rect(const hud* h, int panel, int* x0, int* y0, int* x1, int* y1);
 
-/* Panel background and text colours (0..1 sRGB floats) for pixel metrics. */
+/* Panel background and text colours (0..1 sRGB floats) shared by both panels. */
 void hud_colors(const hud* h, float bg[4], float text[4]);
 
 #endif
