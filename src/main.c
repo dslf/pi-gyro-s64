@@ -1338,7 +1338,7 @@ static int run_selftest(app* a) {
   expect_mesh("assets/nov.obj", 2, OBJ_HAS_NORMALS, &fails);   /* normals computed from faces */
   expect_parse_failure("assets/bad.obj", &fails);
   expect_parse_failure("assets/bad_index.obj", &fails);
-  expect_mesh("utah_teapot.obj", 1250, OBJ_HAS_NORMALS | OBJ_HAS_TEXCOORDS, &fails);
+  expect_mesh("assets/utah_teapot.obj", 1250, OBJ_HAS_NORMALS | OBJ_HAS_TEXCOORDS, &fails);
 
   printf("selftest: BMP orientation\n");
   expect_bmp_orientation(&fails);
@@ -1449,7 +1449,7 @@ static int run_selftest(app* a) {
 }
 
 static const char* pick_default_model(void) {
-  static const char* candidates[] = { "utah_teapot.obj", "assets/utah_teapot.obj", "assets/cube.obj" };
+  static const char* candidates[] = { "assets/utah_teapot.obj", "assets/cube.obj" };
   for (size_t i = 0; i < sizeof candidates / sizeof candidates[0]; i++) {
     FILE* f = fopen(candidates[i], "rb");
     if (f) { fclose(f); return candidates[i]; }

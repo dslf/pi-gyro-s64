@@ -89,7 +89,7 @@ CLI → obj.c (парсинг) → mesh.c (GPU-буферы) → camera.c (ма�
 - Up-axis: OBJ по умолчанию Y-up. Если по одной из осей `min ≈ 0`, а `max > 0` (модель стоит на «земле»,
   типичный Z-up экспорт Blender/3ds Max) — эта ось становится +Y; иначе чистый Y-up.
   По длинному спану ось не определяют: у чайника ширина (6.4) больше высоты (3.15), и он лёг бы на бок.
-- Проверка: `--selftest` на синтетических OBJ + `utah_teapot.obj` (1250 треугольников).
+- Проверка: `--selftest` на синтетических OBJ + `assets/utah_teapot.obj` (1250 треугольников).
 
 **M5 — Освещение** ✅
 - Blinn-Phong: 1 directional (позиционный в мировых координатах) + hemispheric ambient; specular.
@@ -162,7 +162,7 @@ CLI → obj.c (парсинг) → mesh.c (GPU-буферы) → camera.c (ма�
    - `quad_vvn.obj` (`v//vn`, 2 треугольника)
    - `nov.obj` (без нормалей → нормали вычислены, `|n| = 1`)
    - `bad.obj` (мусор → ошибка, не краш), `bad_index.obj` (битые индексы → «no faces found»)
-   - `utah_teapot.obj` (1250 треугольников из 538 quad + 174 triangle, `vn` + `vt`)
+   - `assets/utah_teapot.obj` (1250 треугольников из 538 quad + 174 triangle, `vn` + `vt`)
    Печатаются triangles/verts/radius/span —.span виден сразу, поэтому ориентация модели проверяется числом.
 2. **Компиляция шейдеров:** `--selftest` компилирует `model.vert/frag` на реальном контексте и печатает лог.
 3. **Offscreen:** `--render` создаёт BMP; `tests/check_images.py` проверяет размер, режим RGB,
@@ -187,7 +187,7 @@ selftest: OBJ parser
   ok   assets/nov.obj:          2 tris,  6 verts, radius 0.707, span 1.00 x 1.00 x 0.00
   ok   assets/bad.obj:          no vertices found
   ok   assets/bad_index.obj:    no faces found (1 malformed)
-  ok   utah_teapot.obj:      1250 tris, 3750 verts, radius 0.518, span 1.00 x 0.62 x 0.49
+  ok   assets/utah_teapot.obj:      1250 tris, 3750 verts, radius 0.518, span 1.00 x 0.62 x 0.49
 selftest: shader + offscreen pixels
   ok   rendered 39% of 128x128
   ok   coverage: persp45 39.6% | fov15 44.2% | fov80 33.1% | ortho 38.0%

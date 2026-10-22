@@ -35,7 +35,7 @@ $t = Run-Viewer "--selftest"
 if ($t.code -ne 0) { Fail "selftest"; Write-Output $t.out } else { Ok "selftest" }
 
 # --- headless renders -------------------------------------------------------
-foreach ($r in @("--render assets/cube.obj $Out/out_cube.bmp 256 256", "--render utah_teapot.obj $Out/out_teapot.bmp 800 600", "--render assets/cube.obj $Out/out_cube_wire.bmp 256 256 --wire", "--render utah_teapot.obj $Out/out_teapot_ortho.bmp 400 300 --ortho", "--render utah_teapot.obj $Out/out_teapot_fov80.bmp 400 300 --fov 80", "--render assets/cube.obj $Out/out_cube_tall.bmp 100 400")) {
+foreach ($r in @("--render assets/cube.obj $Out/out_cube.bmp 256 256", "--render assets/utah_teapot.obj $Out/out_teapot.bmp 800 600", "--render assets/cube.obj $Out/out_cube_wire.bmp 256 256 --wire", "--render assets/utah_teapot.obj $Out/out_teapot_ortho.bmp 400 300 --ortho", "--render assets/utah_teapot.obj $Out/out_teapot_fov80.bmp 400 300 --fov 80", "--render assets/cube.obj $Out/out_cube_tall.bmp 100 400")) {
   $r2 = Run-Viewer $r
   if ($r2.code -ne 0) { Fail "render '$r'"; Write-Output $r2.out } else { Ok "render $r" }
 }
@@ -86,7 +86,7 @@ if ($LASTEXITCODE -ne 0) { Fail "wireframe coverage comparison" } else { Ok "wir
 
 # --- screenshot path --------------------------------------------------------
 Remove-Item -Force "$Out/shot.bmp" -ErrorAction SilentlyContinue
-$r = Run-Viewer "--render utah_teapot.obj $Out/shot.bmp 640 480"
+$r = Run-Viewer "--render assets/utah_teapot.obj $Out/shot.bmp 640 480"
 if ($r.code -ne 0) { Fail "screenshot render" } else { Ok "offscreen frame can be written to disk" }
 
 if ($fails -eq 0) { Write-Output "tests: PASS"; exit 0 }
