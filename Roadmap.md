@@ -81,11 +81,11 @@ work approved); Discovery-блокеры E0.T6/E4.T2/E6.T3/E6.T4/E7.T1 оста�
 
 | ID | История / Задача | Статус | Acceptance |
 |---|---|---|---|
-| E5.S1 | Понятный статус окна (fov, dist, проекция, FPS) | 🟡 | заголовок есть; FPS — в HUD-строке (E5.T5) |
-| E5.T5 | Dear ImGui (cimgui, C ABI) как основа HUD: FPS, подсказки горячих клавиш, читаемый контраст | 🟡 | зонд `lab/imgui` зелёный (контраст 6.83:1, coverage 18.35%, кадр 0.26 ms); перенос в продукт — этот шаг |
-| E5.T6 | Сборка vendored `deps/imgui` (`libcimgui.a`) отдельным скриптом; продукт остаётся C11 | 🟡 | recipe подтверждён в зонде (`-DIMGUI_IMPL_API=extern "C"`, `imgui_demo.cpp`, `-static-libstdc++`) |
-| E5.T1 | HUD: подсказки, выбранный треугольник (id/normals) | 🟡 | текст HUD в продукте есть (`src/hud.c`, оверлей в интерактивном кадре); `id`/`normals` выбранного треугольника в HUD — 🔵 следующий шаг |
-| E5.T4 | Глиф-атлас: `GDI TextOutW` → CPU маска глифов как источник HUD-текста | ✅ | перенесено в продукт (`src/hud.c`, `shaders/hud.vert/frag`); selftest: coverage 0.99%, centroid top-left, штрихи глифа 0..30% (mean 9.5%), ориентация top-down (direct 0.126 < mirrored 0.158), детерминизм 0 px |
+| E5.S1 | Понятный статус окна (fov, dist, проекция, FPS) | ✅ | окно + HUD: проекция, fov, dist, FPS, треугольники, выбор, wireframe (`src/main.c` → `hud_frame`) |
+| E5.T5 | Dear ImGui (cimgui, C ABI) как основа HUD: FPS, подсказки горячих клавиш, читаемый контраст | ✅ | перенесено в продукт (`src/hud.c`, `deps/imgui/libcimgui.a`); selftest: hud rect 8..488 × 8..120, ink coverage 17.19%, контраст 6.36:1 (WCAG AA), короткие штрихи 2039 против длинных 6, 0 px на повторном кадре |
+| E5.T6 | Сборка vendored `deps/imgui` (`libcimgui.a`) отдельным скриптом; продукт остаётся C11 | ✅ | `deps/imgui/build.ps1` (инкрементально, проверка exported C-символов), Makefile `imgui` target линкуется; продукт — C11 + `-static-libstdc++` |
+| E5.T1 | HUD: подсказки, выбранный треугольник (id/normals) | 🟡 | горячие клавиши и выбор (hover/pinned, face normals) в HUD есть; `id` треугольника — 🔵 следующий шаг |
+| E5.T4 | Глиф-атлас: `GDI TextOutW` → CPU маска глифов как источник HUD-текста | ✅ | перенесено в продукт (`src/hud.c`, `shaders/hud.vert/frag`); selftest: coverage 0.99%, centroid top-left, штрихи глифа 0..30% (mean 9.5%), ориентация top-down (direct 0.126 < mirrored 0.158), детерминизм 0 px. **Заменено ImGui (E5.T5): GDI-путь и `shaders/hud.*` удалены из продукта** |
 | E5.T2 | Сетка/оси, несколько моделей, tone mapping | ⬜ | скриншот-тест |
 | E5.T3 | DPI/resize корректны | ✅ | on_resize + aspect re-fit |
 
@@ -94,7 +94,7 @@ work approved); Discovery-блокеры E0.T6/E4.T2/E6.T3/E6.T4/E7.T1 оста�
 | ID | История / Задача | Статус | Acceptance |
 |---|---|---|---|
 | E6.S1 | `make test` зелёный без ручного осмотра картинок | ✅ | `tests: PASS`, exit 0 |
-| E6.T1 | Selftest: parser/projection/mouse/pick/outline/frame-orientation | ✅ | 26 selftest-проверок (`ok`, 0 `FAIL`) + 59 регрессионных, exit 0 |
+| E6.T1 | Selftest: parser/projection/mouse/pick/outline/frame-orientation | ✅ | selftest-проверки (`ok`, 0 `FAIL`) + регрессионные, exit 0; HUD-блок измеряет rect/coverage/контраст/runs и детерминизм ImGui-оверлея |
 | E6.T7 | Контракт ориентации кадра (`row 0` = верх) зафиксирован численно, а не «на глаз» | ✅ | CPU-зонд `trash/probes/probe_img.c`: top-down → PASS, GL-порядок → FAIL; selftest `ok  BMP orientation`: верхний ряд = красный, нижний = синий |
 | E6.T6 | Вывод регрессии в `tests/out/` (корень чист, артефакты не в VCS) | ✅ | `tests/out/*.bmp` после прогона, корень без BMP |
 | E6.T2 | Регрессия пикселей (coverage, silhouette, shading) | ✅ | 5 моделей + ortho/fov матрицы |
