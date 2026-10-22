@@ -69,6 +69,9 @@ fn_enum0 my_glGetError;
 fn_e2enum my_glCheckFramebufferStatus;
 fn_str   my_glGetString;
 fn_isen  my_glIsEnabled;
+fn_ee    my_glBlendFunc;
+fn_bool  my_glDepthMask;
+fn_iusf  my_glUniform2fv;
 
 static int g_loaded = 0;
 
@@ -97,7 +100,8 @@ static struct slot table[] = {
   GL_SLOT(ShaderSource), GL_SLOT(GetShaderiv), GL_SLOT(GetProgramiv),
   GL_SLOT(GetShaderInfoLog), GL_SLOT(GetProgramInfoLog),
   GL_SLOT(GetUniformLocation), GL_SLOT(UniformMatrix4fv), GL_SLOT(UniformMatrix3fv),
-  GL_SLOT(Uniform3fv),
+  GL_SLOT(Uniform3fv), GL_SLOT(Uniform2fv),
+  GL_SLOT(BlendFunc), GL_SLOT(DepthMask),
   GL_SLOT(Uniform1f), GL_SLOT(GetError), GL_SLOT(CheckFramebufferStatus),
   GL_SLOT(GetString),
 };

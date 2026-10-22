@@ -69,6 +69,10 @@ typedef int           GLsizei;
 #define GL_LINEAR               0x2601
 #define GL_CLAMP_TO_EDGE        0x812F
 #define GL_BLEND                0x0BE2
+#define GL_ZERO                 0
+#define GL_ONE                  1
+#define GL_SRC_ALPHA            0x0302
+#define GL_ONE_MINUS_SRC_ALPHA  0x0303
 #define GL_CULL_FACE            0x0B44
 #define GL_DEPTH_TEST           0x0B71
 #define GL_BACK                 0x0405
@@ -116,6 +120,8 @@ typedef GLenum          (*fn_enum0)(void);
 typedef GLenum          (*fn_e2enum)(GLenum);
 typedef const GLubyte*  (*fn_str)(GLenum);
 typedef GLboolean       (*fn_isen)(GLenum);
+typedef void            (*fn_ee)(GLenum, GLenum);
+typedef void            (*fn_bool)(GLboolean);
 
 /* --- loaded entry points (NULL until gl_load succeeds) -------------------- */
 extern fn_enum   my_glEnable;
@@ -178,6 +184,9 @@ extern fn_enum0  my_glGetError;
 extern fn_e2enum my_glCheckFramebufferStatus;
 extern fn_str    my_glGetString;
 extern fn_isen   my_glIsEnabled;
+extern fn_ee     my_glBlendFunc;
+extern fn_bool   my_glDepthMask;
+extern fn_iusf   my_glUniform2fv;
 
 /* --- loader --------------------------------------------------------------- */
 typedef void (*(*gl_getproc)(const char*))(void);

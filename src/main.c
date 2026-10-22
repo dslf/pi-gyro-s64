@@ -1,4 +1,4 @@
-/* pi-gyro viewer: OBJ -> OpenGL 3.3 core, orbit camera, screenshot export. */
+/* pi-gyro viewer: OBJ -> OpenGL 4.6 core, orbit camera, screenshot export, HUD overlay. */
 
 #include "gl.h"
 #include "vmath.h"
@@ -7,6 +7,7 @@
 #include "camera.h"
 #include "render.h"
 #include "img.h"
+#include "hud.h"
 
 #include <GLFW/glfw3.h>
 
@@ -24,8 +25,10 @@ typedef struct {
   gpu_mesh mesh;
   obj_mesh cpu;      /* kept after upload: cursor picking and the outline read vertices */
   renderer rend;
+  hud hudl;           /* text overlay drawn over the model, top-left of the viewport */
   int width, height;
   int wireframe;
+  int hud_overlay;      /* HUD is drawn only in interactive frames; offscreen renders stay HUD-free */
   int dirty;
   int pressing;      /* left button held down, so a release can be read as a pick */
   double pressx, pressy;
@@ -191,6 +194,17 @@ static void draw_scene(app* a, const framebuffer* fb) {
   renderer_draw(&a->rend, &a->mesh, &vp, &model, &nmat, eye, a->wireframe);
   my_glDisable(GL_DEPTH_TEST);
 
+  /* HUD overlay: camera state plus the picked triangle, top-left in pixel space. */
+  if (a->hud_overlay) {
+    int sel = a->locked >= 0 ? a->locked : a->hover;
+    char line1[160], line2[160];
+    snprintf(line1, sizeof line1, "%s  fov %.0f deg  dist %.2f", a->cam.ortho ? "ortho" : "persp", a->cam.fov_deg, a->cam.dist);
+    snprintf(line2, sizeof line2, "%d tris  selected %d%s", a->cpu.triangles, sel,
+             sel < 0 ? " (none)" : (a->locked >= 0 ? " (pinned)" : " (hover)"));
+    hud_draw(&a->hudl, w, h, 6, 4, line1);
+    hud_draw(&a->hudl, w, h, 6, 4 + a->hudl.ch, line2);
+  }
+
   if (fb) my_glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
@@ -233,7 +247,7 @@ static int init_gl(app* a, int w, int h, int visible) {
 
   a->win = glfwCreateWindow(w, h, "pi-gyro OBJ viewer", NULL, NULL);
   if (!a->win) {
-    fprintf(stderr, "failed to create an OpenGL 3.3 core context (%dx%d)\n", w, h);
+    fprintf(stderr, "failed to create an OpenGL 4.6 core context (%dx%d)\n", w, h);
     glfwTerminate();
     return -1;
   }
@@ -253,6 +267,14 @@ static int init_gl(app* a, int w, int h, int visible) {
   if (!ver) { fprintf(stderr, "%s\n", err); return -1; }
   printf("GL  : %s\n", ver);
   printf("GPU : %s\n", gpu ? gpu : "unknown");
+
+  char hud_err[256] = "";
+  if (hud_init(&a->hudl, hud_err, sizeof hud_err) < 0) {
+    fprintf(stderr, "HUD init failed: %s\n", hud_err);
+    glfwDestroyWindow(a->win);
+    glfwTerminate();
+    return -1;
+  }
   return 0;
 }
 
@@ -275,6 +297,7 @@ static int run_interactive(app* a, const char* model_path) {
   printf("controls: LMB rotate | RMB pan | wheel zoom | Ctrl+wheel fov | [ ] fov | O ortho/perspective\n");
   printf("          W wire | R reset | S screenshot | hover outlines a triangle, click pins it | Esc quit\n");
   a->dirty = 1;
+  a->hud_overlay = 1; /* the overlay belongs to the interactive window, not to measurement frames */
 
   while (!glfwWindowShouldClose(a->win)) {
     handle_mouse(a);
@@ -680,6 +703,196 @@ static void expect_bmp_orientation(int* fails) {
   }
 }
 
+/* Pixels that differ between two top-down RGBA frames inside a rectangle. The two frames
+   are the same scene with the HUD hidden and shown, so a difference is a HUD pixel. */
+static int region_diff_count(const unsigned char* a, const unsigned char* b, int w, int h,
+                             int x0, int y0, int x1, int y1, int tol) {
+  int n = 0;
+  for (int y = y0; y < y1 && y < h; y++)
+    for (int x = x0; x < x1 && x < w; x++) {
+      const unsigned char* p = a + ((size_t)y * w + x) * 4;
+      const unsigned char* q = b + ((size_t)y * w + x) * 4;
+      int dr = p[0] - q[0], dg = p[1] - q[1], db = p[2] - q[2];
+      if (dr * dr + dg * dg + db * db > tol * tol) n++;
+    }
+  return n;
+}
+
+/* Centroid of every differing pixel: tells where the HUD landed without guessing. */
+static void diff_centroid(const unsigned char* a, const unsigned char* b, int w, int h, int tol,
+                          int* count, double* cx, double* cy) {
+  long sx = 0, sy = 0, n = 0;
+  for (int y = 0; y < h; y++)
+    for (int x = 0; x < w; x++) {
+      const unsigned char* p = a + ((size_t)y * w + x) * 4;
+      const unsigned char* q = b + ((size_t)y * w + x) * 4;
+      int dr = p[0] - q[0], dg = p[1] - q[1], db = p[2] - q[2];
+      if (dr * dr + dg * dg + db * db > tol * tol) { sx += x; sy += y; n++; }
+    }
+  *count = (int)n;
+  *cx = n ? (double)sx / (double)n : 0.0;
+  *cy = n ? (double)sy / (double)n : 0.0;
+}
+
+/* Fraction of changed pixels per row inside one HUD glyph cell, rows top-down. */
+static void rendered_row_profile(const unsigned char* base, const unsigned char* hud, int w,
+                                 int x0, int cw, int y0, int ch, float* prof, int cap) {
+  for (int v = 0; v < cap; v++) prof[v] = 0.0f;
+  for (int v = 0; v < ch && v < cap; v++) {
+    int ink = 0;
+    for (int c = 0; c < cw; c++) {
+      int x = x0 + c, y = y0 + v;
+      const unsigned char* p = base + ((size_t)y * w + x) * 4;
+      const unsigned char* q = hud + ((size_t)y * w + x) * 4;
+      int dr = p[0] - q[0], dg = p[1] - q[1], db = p[2] - q[2];
+      if (dr * dr + dg * dg + db * db > 16 * 16) ink++;
+    }
+    prof[v] = (float)ink / (float)cw;
+  }
+}
+
+/* Mean absolute difference between two row profiles; used for orientation checks. */
+static float profile_delta(const float* a, const float* b, int n) {
+  float sum = 0.0f;
+  for (int i = 0; i < n; i++) sum += fabsf(a[i] - b[i]);
+  return sum / (float)n;
+}
+
+/* The HUD is the overlay, so it is measured against the same scene drawn without it:
+   every differing pixel is HUD ink. Position, coverage, stroke structure, orientation
+   and determinism are all numeric, so a flipped or slab-like glyph cannot pass. */
+static void hud_selftest(app* a, int* fails) {
+  printf("selftest: HUD overlay\n");
+  char err[256] = "";
+  const int w = 320, h = 200;
+  framebuffer fb;
+  if (fb_create(&fb, w, h, err, sizeof err) < 0) {
+    printf("  FAIL hud framebuffer: %s\n", err);
+    (*fails)++;
+    return;
+  }
+
+  static unsigned char px[320 * 200 * 4];
+  static unsigned char px2[320 * 200 * 4];
+  static unsigned char px3[320 * 200 * 4];
+  camera_reset(&a->cam, a->mesh.fit);
+
+  a->hud_overlay = 0;
+  draw_scene(a, &fb);
+  int rc = fb_read_rgba(&fb, px, err, sizeof err);
+  a->hud_overlay = 1;
+  draw_scene(a, &fb);
+  rc |= fb_read_rgba(&fb, px2, err, sizeof err);
+  draw_scene(a, &fb);
+  rc |= fb_read_rgba(&fb, px3, err, sizeof err);
+  a->hud_overlay = 0;
+  if (rc != 0) {
+    printf("  FAIL hud readback: %s\n", err);
+    (*fails)++;
+    fb_free(&fb);
+    return;
+  }
+
+  int n = 0;
+  double cx = 0.0, cy = 0.0;
+  diff_centroid(px, px2, w, h, 8, &n, &cx, &cy);
+  if (n < 40) {
+    printf("  FAIL HUD changed only %d pixels - overlay is not visible\n", n);
+    (*fails)++;
+  } else {
+    printf("  ok   HUD ink: %d pixels of %dx%d (%.2f%% of frame)\n", n, w, h, 100.0 * n / (double)(w * h));
+    if (cy >= h * 0.5 || cx >= w * 0.5) {
+      printf("  FAIL HUD centroid (%.1f, %.1f) is outside the top-left half of %dx%d\n", cx, cy, w, h);
+      (*fails)++;
+    } else {
+      printf("  ok   HUD centroid (%.1f, %.1f) sits top-left\n", cx, cy);
+    }
+  }
+
+  /* Determinism: the same frame twice must produce identical HUD pixels. */
+  int moved = region_diff_count(px2, px3, w, h, 0, 0, w, h, 8);
+  if (moved != 0) {
+    printf("  FAIL HUD moved %d pixels between identical redraws\n", moved);
+    (*fails)++;
+  } else {
+    printf("  ok   HUD layout is deterministic (0 pixels moved on redraw)\n");
+  }
+
+  /* First glyph cell of the first line, drawn at (6, 4). */
+  const int cw = a->hudl.cw, ch = a->hudl.ch;
+  const char first = a->cam.ortho ? 'o' : 'p';
+  float mask[32], got[32];
+  const int cap = ch < 32 ? ch : 32;
+  hud_glyph_row_profile(&a->hudl, first, mask, cap);
+  rendered_row_profile(px, px2, w, 6, cw, 4, ch, got, cap);
+
+  float lo = 1.0f, hi = 0.0f, ink_rows = 0.0f;
+  for (int v = 0; v < cap; v++) {
+    if (got[v] < lo) lo = got[v];
+    if (got[v] > hi) hi = got[v];
+    ink_rows += got[v];
+  }
+  if (hi - lo < 0.15f) {
+    printf("  FAIL glyph '%c' cell is flat (row ink %.1f%%..%.1f%%) - geometry is not glyph-shaped\n",
+           first, lo * 100.0f, hi * 100.0f);
+    if (cw * ch <= 512) {
+      unsigned char cell[512];
+      hud_glyph_cell_mask(&a->hudl, first, cell, cw * ch);
+      printf("  mask cell (ink where lum < 160):\n");
+      for (int v = 0; v < ch; v++) {
+        printf("    %2d ", v);
+        for (int c = 0; c < cw; c++) printf("%c", cell[v * cw + c] < 160 ? '#' : '.');
+        printf("\n");
+      }
+      printf("  rendered HUD pixels in the same cell:\n");
+      for (int v = 0; v < ch; v++) {
+        printf("    %2d ", v);
+        for (int c = 0; c < cw; c++) {
+          int x = 6 + c, y = 4 + v;
+          const unsigned char* p = px + ((size_t)y * w + x) * 4;
+          const unsigned char* q = px2 + ((size_t)y * w + x) * 4;
+          int dr = p[0] - q[0], dg = p[1] - q[1], db = p[2] - q[2];
+          printf("%c", dr * dr + dg * dg + db * db > 16 * 16 ? '#' : '.');
+        }
+        printf("\n");
+      }
+    }
+    (*fails)++;
+  } else {
+    printf("  ok   glyph '%c' has stroke structure (row ink %.1f%%..%.1f%%, mean %.1f%%)\n",
+           first, lo * 100.0f, hi * 100.0f, ink_rows / (float)cap * 100.0f);
+  }
+
+  /* Orientation: rendered rows must match the CPU mask rows top-down, not mirrored. */
+  float mirror[32];
+  for (int v = 0; v < cap; v++) mirror[v] = mask[cap - 1 - v];
+  float direct = profile_delta(got, mask, cap);
+  float flipped = profile_delta(got, mirror, cap);
+  printf("  glyph '%c' vs mask: direct %.3f, mirrored %.3f\n", first, direct, flipped);
+  if (direct >= flipped) {
+    printf("  FAIL glyph rows match the mask better when mirrored (direct %.3f >= mirrored %.3f)\n", direct, flipped);
+    (*fails)++;
+  } else if (direct > 0.30f) {
+    printf("  FAIL glyph rows do not match the mask (direct %.3f)\n", direct);
+    (*fails)++;
+  } else {
+    printf("  ok   glyph orientation matches the mask top-down (direct %.3f < mirrored %.3f)\n", direct, flipped);
+  }
+
+  /* Ink must stay ink: most of the cell must still be background, not a solid slab. */
+  int cell_px = cw * ch;
+  int cell_ink = region_diff_count(px, px2, w, h, 6, 4, 6 + cw, 4 + ch, 8);
+  double bg = 1.0 - (double)cell_ink / (double)cell_px;
+  if (bg < 0.40) {
+    printf("  FAIL glyph cell is %.1f%% ink - a slab, not text\n", (1.0 - bg) * 100.0);
+    (*fails)++;
+  } else {
+    printf("  ok   glyph cell keeps %.1f%% background around the ink\n", bg * 100.0);
+  }
+
+  fb_free(&fb);
+}
+
 static int run_selftest(app* a) {
   int fails = 0;
   printf("selftest: OBJ parser\n");
@@ -792,6 +1005,7 @@ static int run_selftest(app* a) {
   projection_selftest(&fails);
   orbit_drag_selftest(&fails);
   mouse_pick_selftest(&fails);
+  hud_selftest(a, &fails);
 
   printf("selftest: %s\n", fails == 0 ? "PASS" : "FAILED");
   return fails == 0 ? 0 : 1;
@@ -902,6 +1116,7 @@ int main(int argc, char** argv) {
   else rc = run_interactive(&a, model);
 
   renderer_free(&a.rend);
+  hud_free(&a.hudl);
   mesh_free(&a.mesh);
   obj_mesh_free(&a.cpu);
   glfwDestroyWindow(a.win);
