@@ -1,4 +1,4 @@
-#version 330 core
+#version 460 core
 in vec3 vWorld;
 in vec3 vNrm;
 in vec2 vUv;

@@ -1,4 +1,4 @@
-# PLAN — 3D-рендер OBJ на C + OpenGL 3.3
+# PLAN — 3D-рендер OBJ на C + OpenGL 4.6
 
 ## 1. Цель и критерии готовности
 
@@ -20,7 +20,7 @@
 | gcc | 14.2.0, `C:\Apps\w64devkit\bin\gcc.exe` |
 | GLFW | `include/GLFW/glfw3.h`, `lib/libglfw3.a` (статический), `lib/glfw3.dll` |
 | OpenGL | `lib/libopengl32.a`, `include/GL/gl.h` |
-| Контекст | 3.3 core profile создан и напечатан: `3.3.0 NVIDIA 616.92` |
+| Контекст | 4.6 core profile (переход E0.T7, ADR `PROJECT_MEMORY.md` §4.1); печатается `GL  : 4.6.0 NVIDIA 616.92`. Исторически M0 проверял 3.3 core (`3.3.0 NVIDIA 616.92`) |
 | GPU | NVIDIA RTX 4070 Ti (основной), AMD iGPU — резерв |
 | Сборка | `make`, `cmake`, `ninja` доступны |
 | Нет | clang, cl, vcpkg, glad.c, cglm, stb_image.h |
@@ -44,7 +44,7 @@ src/
   render.c/.h   конвейер: uniforms, draw, FBO offscreen, glReadPixels
   img.c/.h      RGBA -> BMP
 shaders/
-  model.vert    GLSL 330
+  model.vert    GLSL 460 (#version 460 core)
   model.frag    Blinn-Phong, sky ambient, specular, gamma
 assets/
   cube.obj, quad_vvn.obj, nov.obj, bad.obj, bad_index.obj
