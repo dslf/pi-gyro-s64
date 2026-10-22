@@ -35,8 +35,9 @@
 | GLFW resize (Windows) | При перетаскивании границы ОС запускает **modal message loop** внутри `DefWindowProc`: `glfwPollEvents` и все GLFW-коллеки (framebuffer size) не вызываются до конца drag'а → чёрные полосы. Выход: размер читается из `glfwGetFramebufferSize` каждый кадр + перерисование в `glfwSetWindowRefreshCallback` (вызывается из WM_PAINT внутри modal loop) |
 | Git | **репозиторий создан** (`git init`, identity `pi-agent`/`agent@local`); remote отсутствует; `.gitignore` + `.gitattributes` (`* text=auto eol=lf`) |
 | pi | окружение pi.dev; session-recall через `@sting8k/pi-vcc` (package.json — только tooling, не приложение) |
+| `README.md` | **публичное описание проекта** для удалённого репозитория `dslf/pi-gyro-s64` (витрина: о чём проект, как выглядит, как собрать/запустить/проверить). Это **не** инструкции для агента: регламент — `AGENTS.md` (§6 о составе README), решения — `PROJECT_MEMORY.md`, статусы — `Roadmap.md` |
 | OBJ-семантика парсера | `faces` — число **авторских полигонов** из `f`-строк (не число треугольников рендера): полигон из k углов даёт k−2 треугольника; `triangles` — треугольники рендера; `face_ids[tri]` — 0-based ordinal грани из файла; `vert_ids[corner]` — 1-based номер вершины ровно из `f`-строки (отрицательные: `-1` = последняя вершина, отсчёт от **числа вершин**, не от числа float'ов) |
-| Up-axis | определяется по bbox и не меняется молча: X-протяжённость самая большая → X-up, Z → Z-up, иначе **Y-up (конвенция OBJ)**. `--up <axis>` переопределяет явно, печатаются обе оси |
+| Up-axis | определяется по bbox в `obj.c` и нормализуется чистой ротацией в +Y: X-протяжённость самая большая → X-up, Z → Z-up, иначе **Y-up (конвенция OBJ)**. Явного CLI-флага переопределения нет (`--up` не в `usage`), отдельная численная проверка оси не добавлена — E1.T6 🟡 |
 | Нормали | `OBJ_NORMALS_AUTHORED` ставится только когда в файле есть `vn`-строки; нормали, вычисленные парсером (cross product), подаются шейдеру как атрибут `vn`, но в логах и HUD помечаются как **computed** вместе с оценкой отклонения от нормали грани |
 
 ## 3. Архитектура (текущая база)
@@ -141,11 +142,27 @@ selftest'ом без окна; шаг печатает номер грани, н
 `src/main.c`, а не желаемый список: `Ctrl+wheel` и `[ ]` меняют viewing angle (не дистанцию),
 `O` — проекция, `W` — wireframe overlay, `S` — screenshot.
 
+18. **`README.md` — публичное описание репозитория, а не инструкции.** Это витрина
+    `dslf/pi-gyro-s64`: что это, как выглядит, как собирается и запускается, чем проверяется.
+    Регламент и роли — в `AGENTS.md`, решения — в `PROJECT_MEMORY.md`, статусы — в `Roadmap.md`;
+    в README они не дублируются. README правится в том же коммите, что меняет поведение (hotkeys,
+    CLI, команды сборки, версии стека), числа берутся из фактического вывода команд; расхождение
+    «README ≠ код/вывод» — defect по AGENTS.md §0.8 (исторический пример: README описывал `L`,
+    `LWin+W`, `T`, `P`, `H`, `--shot`, которых в продукте нет). Состав секций и проверка после
+    правки — AGENTS.md §6.
+
+19. **Бинари — в `build/`, отчёты шага — в `docs/reports/` (оба решения owner'а, 2026-10-22).**
+    `make` собирает `build/viewer.exe` (каталог создаётся `mkdir -p`, игнорируется git — бинари не
+    публикуются), корень остаётся чистым: только источники и документы. Регрессия и selftest
+    вызовы идут через `./build/viewer.exe`. Отчёт каждого шага публикуется в
+    `docs/reports/report_YYYY-MM-DD-<task>.md` (трекается); `trash/` остаётся scratch-harness
+    (git-ignored). Формат и правила отчёта — `docs/reports/README.md` и `AGENTS.md` §0.5/§5.
+
 ## 5. Текущий статус
 
 - M0–M6b: парсер, GL-загрузчик, камера/framing, шейдер, wireframe, скриншот, offscreen BMP, CLI — готово.
 - M7: выбор граней (hover outline, click pin/unpin) + конвенции мыши + picking + outline-пиксельный
-  тест — готово, `viewer.exe --selftest` → PASS, `make test` → `tests: PASS`.
+  тест — готово, `build/viewer.exe --selftest` → PASS, `make test` → `tests: PASS`.
 - Зафиксировано: drag-конвенция корректна в обеих проекциях (perspective и ortho) и fov 20/60/80.
 - M8b (виток E6.T7): контракт ориентации кадров (`row 0` = верх) исправлен в документации `img.h`
   и подтверждён численно: новый selftest-блок + CPU-зонд.
@@ -178,6 +195,15 @@ selftest'ом без окна; шаг печатает номер грани, н
   `grown target 256x192 -> 512x384: corner vs background max diff 0, black pixels in the newly
   exposed area 0, silhouette coverage 27.54%` и зонд `lab/probes/probe_resize.ps1`
   (`repaints 3, fps 170.0, sizes 1264x861 -> 684x441, stderr пуст`) — обе зелёные.
+- M12 (публикация + portable-проверка): remote `https://github.com/dslf/pi-gyro-s64.git`
+  (public, branch `main`); на момент проверки `HEAD` опережает `origin/main` на 2 коммита
+  (push — только по явному запросу owner). Сборка из чистого clone подтверждена локально:
+  `git clone` во временный каталог → `make imgui` (imgui: OK, objects=9, archive 2.04 MB) →
+  `make` → `--selftest: PASS` → `--render assets/cube.obj tests/out/frame.bmp 800 600` →
+  `make test` (`tests: PASS`), все exit 0; временный клон удалён. Трекаемого скрипта
+  клон-проверки в репозитории нет — проверка выполняется вручную (Linux/macOS не проверялись,
+  E6.T3 🔵). `README.md` — публичное описание репозитория; его состав и правила обновления
+  описаны в `AGENTS.md` §6.
 - Артефакты: кадры регрессии — `tests/out/` (git-ignored), бинари/кадры/логи зондов —
   `lab/probes/` (git-ignored через `lab/.gitignore`, источники зондов трекаются), временный вывод —
   `trash/` (не публикуется). В продукном каталоге артефактов нет.
@@ -216,15 +242,20 @@ selftest'ом без окна; шаг печатает номер грани, н
   0 px, штрихи 1101/0 и 1490/3, детерминизм 0 px.
   Интерактивный цикл рисует **каждый кадр** (`glfwPollEvents`, без гейта по `dirty`), поэтому HUD
   обновляется и в простое: на 170 Гц мониторе замерено 501 кадр / 3.00 с = **170 fps**
-  (`viewer.exe assets/utah_teapot.obj --idle-report 3`). `fps` считается как кадры за окно 0.5 с
+  (`build/viewer.exe assets/utah_teapot.obj --idle-report 3`). `fps` считается как кадры за окно 0.5 с
   (EMA по dt завышал цифру, когда ОС будит цикл раньше). `dirty` остаётся только для обновления
   заголовка окна. Искусственный троттлинг не добавлялся: реальную частоту задаёт vsync/GPU.
 - **Сборка ImGui**: требует `g++` + `ar` и линкует `-lstdc++ -static-libgcc -static-libstdc++`.
   Продакт остаётся C11 (вызывает только `cimgui.h`). `deps/imgui/build/` и `lab/imgui/cimgui/`
   (vendored клон для зонда) — git-ignored; чистый clone собирает библиотеку сам, но зонд `lab/imgui`
   требует повторного клона cimgui.
-- **Отчёты шага**: сейчас в `trash/logs/report_*.md` (git-ignored). Трекаемый каталог отчётов
-  (`docs/reports/`) — 🔵 решение, увязано с E7.T3.
+- **Отчёты шага**: публикуются в `docs/reports/report_YYYY-MM-DD-<task>.md` (трекаются, ADR §4.19);
+  рабочий scratch/harness-лог остаётся в `trash/logs/` (git-ignored, не публикуется).
+- **Бинари продукта**: `build/viewer.exe` (каталог git-ignored, создаётся `make`); в корне бинарь
+  больше не появляется.
+- Явного CLI-переопределения up-axis нет: ось определяется по bbox в `obj.c` и нормализуется в
+  +Y; `--up <axis>` отсутствует в `usage`, selftest-блок на X-up/Z-up фикстурах не написан —
+  E1.T6 🟡, 🔵 ждёт решения owner.
 - **Машинные зависимости**: Windows-only (opengl32/wgl). Кроссплатформенность не проверялась.
 - **Производительность**: picking = CPU-обход всех треугольников на каждый hover (3750 tri ≈ 0.3 ms,
   но для 1M tri нужен BVH/облок). Пока не критично, риск зафиксирован.

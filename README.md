@@ -53,15 +53,15 @@ C11 без внешних библиотек кроме GLFW и Dear ImGui. **П
 
 ```sh
 make imgui      # на чистом клоне сначала: собирает vendored Dear ImGui (libcimgui.a)
-make            # viewer.exe (GCC + mingw-w64; линк GLFW/imgui статически)
+make            # build/viewer.exe (GCC + mingw-w64; линк GLFW/imgui статически)
 make test       # selftest + tests/run_tests.ps1
 ```
 
 ```sh
-./viewer.exe                     # Utah teapot
-./viewer.exe assets/cube.obj     # свой файл
-./viewer.exe assets/cube.obj --shot out.bmp 800 600   # offscreen BMP без окна
-./viewer.exe --selftest          # 8 разделов, 59 численных проверок
+./build/viewer.exe                     # Utah teapot
+./build/viewer.exe assets/cube.obj     # свой файл
+./build/viewer.exe --render assets/cube.obj tests/out/frame.bmp 800 600   # offscreen BMP без окна
+./build/viewer.exe --selftest          # 10 разделов, 60 численных проверок
 ```
 
 ### Управление
@@ -85,7 +85,7 @@ make test       # selftest + tests/run_tests.ps1
 
 ## Проверка
 
-Публичная проверка — `make test`: сборка, `viewer.exe --selftest` (8 разделов, 59 проверок, exit 0),
+Публичная проверка — `make test`: сборка, `build/viewer.exe --selftest` (10 разделов, 60 проверок, exit 0),
 `tests/run_tests.ps1` (BMP-метрики: coverage, outline, picking, resize, wireframe, offscreen).
 Проверки числовые; пороги относительные.
 
@@ -96,7 +96,8 @@ src/         продукт (C11): obj, camera, vmath, mesh, shader, render, gl,
 shaders/     GLSL 460 core
 assets/      тестовые модели (cube, teapot)
 tests/       PS1 + Python проверка пикселей
-docs/        скриншот для README
+docs/        скриншот для README + отчёты шага (docs/reports/)
+build/       бинари продукта (`make` кладёт build/viewer.exe; каталог git-ignored)
 lab/probes/  изолированные зонды ABI/GL/HUD — см. lab/probes/README.md
 deps/imgui/  vendored Dear ImGui (MIT) + libcimgui.a
 Roadmap.md   фазы E0…E7 и статусы
@@ -109,14 +110,12 @@ AGENTS.md    регламент разработки
 Проект написан **ИИ в локальном окружении**, без ручной правки кода:
 
 - **Harness:** [pi.dev](https://pi.dev) coding agent (TUI, сессии в `~/.pi/agent/sessions`).
-- **Модель:** локальный Qwen-чекпоинт (`PI_MODEL=qwen3.8-flash-next-gyro-gyro-s`,
-  provider `strata`, OpenAI-compatible endpoint на локальной машине), reasoning medium.
-- **Контекст:** 64k токенов; лимит ответа owner'а 8192 токена, поэтому большие правки идут по
-  частям (1–2k токена на генерацию, проверка между шагами).
-- **Процесс:** Discovery (аналитик/PM) → Implementation (dev) → Verification (QA), роли описаны в
-  `AGENTS.md`; решения фиксируются в `PROJECT_MEMORY.md` (ADR) и `Roadmap.md`; новый функционал
-  сначала проверяется isolated-прототипом в `lab/`, потом переносится в `src/`; каждый шаг
-  сопровождается численной проверкой, без плейсхолдеров и «зеленения» тестов.
+- **Модель:** локальный Qwen-чекпоинт (provider `strata`, OpenAI-compatible endpoint на
+  локальной машине).
+- **Процесс:** новый функционал сначала проверяется isolated-прототипом в `lab/`, потом переносится
+  в `src/`; каждый шаг сопровождается численной проверкой (пиксели, coverage, delta), без
+  плейсхолдеров и без «зеленения» тестов; решения и факты окружения фиксируются в
+  `PROJECT_MEMORY.md`, статусы работ — в `Roadmap.md`, регламент разработки — в `AGENTS.md`.
 
 ## Ограничения и open tasks
 
