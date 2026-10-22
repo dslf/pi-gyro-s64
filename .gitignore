@@ -25,3 +25,6 @@ tests/out/
 *.o
 *.a
 *.pdb
+
+# Test models are product inputs, not artifacts
+!assets/*.obj

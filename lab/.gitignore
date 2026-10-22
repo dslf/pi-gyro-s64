@@ -7,3 +7,7 @@ imgui.ini
 *.a
 *.bmp
 *.log
+*.png
+*.err
+*.txt
+*.tmp

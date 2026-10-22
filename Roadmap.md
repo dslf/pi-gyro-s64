@@ -21,7 +21,7 @@ work approved); Discovery-блокеры E0.T6/E4.T2/E6.T3/E6.T4/E7.T1 оста�
 | E0.T1 | Создать артефакты памяти/дорожной карты/инструкций | ✅ | файлы в корне, структура заполнена |
 | E0.T2 | Опрос требований (5–7 вопросов: цели, стек, форматы, UX, QA, риски) | 🟡 | ответы зафиксированы в §Requirements |
 | E0.T3 | Утвердить Project Scope + Definition of Done v1 | ⬜ | подписан список “готово/не готово” |
-| E0.T4 | Решить: git init или работать без VCS | ✅ | `git init` выполнен; трекаются только продукт и документы |
+| E0.T4 | Решить: git init или работать без VCS | ✅ | `git init` + remote `origin` = https://github.com/dslf/pi-gyro-s64 (public, branch `main`, push выполнен); трекаются только источники и документы |
 | E0.T5 | Решить: политика артефактов (`build/`, `lab/`, `artifacts/`, мусор в корне) | ✅ | вывод тестов в `tests/out/`, зонды в `trash/`, `.gitignore`/`.gitattributes` |
 | E0.T6 | Определить приоритет: fidelity рендера vs интерактив vs тесты | 🔵 | ранжирование Epics E4–E7 |
 | E0.T7 | Переход на OpenGL 4.6 core (контекст + шейдеры `#version 460 core`) | ✅ | `GL  : 4.6.0 NVIDIA 616.92`; сборка без warning'ов; selftest 26 ok / регрессия 59 ok, fail 0, exit 0 |
@@ -81,7 +81,7 @@ work approved); Discovery-блокеры E0.T6/E4.T2/E6.T3/E6.T4/E7.T1 оста�
 
 | ID | История / Задача | Статус | Acceptance |
 |---|---|---|---|
-| E5.S1 | Понятный статус окна (fov, dist, проекция, FPS) + мгновенный repaint на resize | ✅ | окно + HUD: проекция, fov, dist, FPS, треугольники, выбор, wireframe (`src/main.c` → `hud_frame`); интерактивный цикл рисует каждый кадр (HUD живой без ввода), `fps` = кадры за окно 0.5 с, диаг-флаг `--idle-report <sec>`; resize: размер читается из окна каждый кадр (`sync_framebuffer_size`) и перерисовывается в том же кадре, плюс repaint в refresh-коллеке на WM_PAINT (модальный цикл drag'а не доходит до `glfwPollEvents`) — чёрных полос нет; selftest-блок «frame size follows the target immediately» (размер из окна, новая площадь не чёрная) + зонд `trash/probes/probe_resize.ps1` |
+| E5.S1 | Понятный статус окна (fov, dist, проекция, FPS) + мгновенный repaint на resize | ✅ | окно + HUD: проекция, fov, dist, FPS, треугольники, выбор, wireframe (`src/main.c` → `hud_frame`); интерактивный цикл рисует каждый кадр (HUD живой без ввода), `fps` = кадры за окно 0.5 с, диаг-флаг `--idle-report <sec>`; resize: размер читается из окна каждый кадр (`sync_framebuffer_size`) и перерисовывается в том же кадре, плюс repaint в refresh-коллеке на WM_PAINT (модальный цикл drag'а не доходит до `glfwPollEvents`) — чёрных полос нет; selftest-блок «frame size follows the target immediately» (размер из окна, новая площадь не чёрная) + зонд `lab/probes/probe_resize.ps1` |
 | E5.T5 | Dear ImGui (cimgui, C ABI) как основа HUD: FPS, подсказки горячих клавиш, читаемый контраст | ✅ | две панели, каждая облегает текст по обеим осям (`AlwaysAutoResize`, ширина не задаётся): статистика слева сверху, подсказки внизу по центру с лимитом ширины (`HUD_HELP_W`, перенос через `PushTextWrapPos`); selftest: rect панелей (stats 8..528 × 8..75, help 100..860 × 196..312), чернила вплотную к краям (худший пустой зазор 1 px, справа у help slack переноса ≤80 px), контраст 6.57:1 / 6.32:1, coverage 11.93% / 11.86%, чернила вне панелей 0 px, без выбора карточка сжимается 520×67 → 349×48, перенос подсказок на узком кадре 760×116 → 404×184, детерминизм 0 px |
 | E5.T6 | Сборка vendored `deps/imgui` (`libcimgui.a`) отдельным скриптом; продукт остаётся C11 | ✅ | `deps/imgui/build.ps1` (инкрементально, проверка exported C-символов), Makefile `imgui` target линкуется; продукт — C11 + `-static-libstdc++` |
 | E5.T1 | HUD: подсказки, выбранный треугольник (id/normals) | 🟡 | подсказки вынесены в отдельную панель внизу по центру (`HUD_PANEL_HELP`), выбор (hover/pinned, face normals) в панели статистики; `id` треугольника — 🔵 следующий шаг |
@@ -95,18 +95,18 @@ work approved); Discovery-блокеры E0.T6/E4.T2/E6.T3/E6.T4/E7.T1 оста�
 |---|---|---|---|
 | E6.S1 | `make test` зелёный без ручного осмотра картинок | ✅ | `tests: PASS`, exit 0 |
 | E6.T1 | Selftest: parser/projection/mouse/pick/outline/frame-orientation | ✅ | selftest-проверки (`ok`, 0 `FAIL`) + регрессионные, exit 0; HUD-блок измеряет rect/coverage/контраст/runs и детерминизм ImGui-оверлея |
-| E6.T7 | Контракт ориентации кадра (`row 0` = верх) зафиксирован численно, а не «на глаз» | ✅ | CPU-зонд `trash/probes/probe_img.c`: top-down → PASS, GL-порядок → FAIL; selftest `ok  BMP orientation`: верхний ряд = красный, нижний = синий |
+| E6.T7 | Контракт ориентации кадра (`row 0` = верх) зафиксирован численно, а не «на глаз» | ✅ | CPU-зонд `lab/probes/probe_img.c`: top-down → PASS, GL-порядок → FAIL; selftest `ok  BMP orientation`: верхний ряд = красный, нижний = синий |
 | E6.T6 | Вывод регрессии в `tests/out/` (корень чист, артефакты не в VCS) | ✅ | `tests/out/*.bmp` после прогона, корень без BMP |
 | E6.T2 | Регрессия пикселей (coverage, silhouette, shading) | ✅ | 5 моделей + ortho/fov матрицы |
 | E6.T3 | Кроссплатформенная проверка (Linux/macOS) | 🔵 | зависит от scope |
-| E6.T4 | CI-рука (или локальный gate) + фиксация артефактов | 🔵 | git есть, remote нет; gate = `tests/run_tests.ps1` |
+| E6.T4 | CI-рука (или локальный gate) + фиксация артефактов | 🔵 | git + remote (public `main`) есть; gate = `tests/run_tests.ps1`, CI-рука не настроена |
 | E6.T5 | Производительность: время кадра, время picking на 1M tri | ⬜ | метрики в отчёте |
 
 ## E7. Доставка и переносимость (⬜)
 
 | ID | История / Задача | Статус | Acceptance |
 |---|---|---|---|
-| E7.T1 | Каталогная политика: `build/`, `lab/`, `artifacts/` (мусор из корня уходит) | 🔵 | зависит от E0.T5 |
+| E7.T1 | Каталогная политика: `build/`, `lab/`, `artifacts/` (мусор из корня уходит) | 🟡 | корень чист: только источники/документы + `viewer.exe` (ignored); зонды перенесены в `lab/probes` (источники трекаются, артефакты игнорирует `lab/.gitignore`); кадры — `tests/out/` и `docs/` (PNG разрешён только в `docs/`); модели — `assets/` (`!assets/*.obj`); отчётный вывод в `trash/` не публикуется. `build/`/`artifacts/` как каталоги продукта не заведены |
 | E7.T2 | Portable build (Makefile/CMake, без абсолютных путей) | ⬜ | сборка из чистого clone |
 | E7.T3 | README для пользователя и для агента | ⬜ | команды + expectations |
 

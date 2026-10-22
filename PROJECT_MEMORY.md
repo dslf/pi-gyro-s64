@@ -24,7 +24,7 @@
 | GPU | NVIDIA RTX 4070 Ti (основная), AMD iGPU резерв |
 | Python | есть, используется для проверки BMP (`tests/check_images.py`) |
 | BMP на диске | байты файла — **BGR**, строки файла снизу вверх (bottom-up DIB). Байты в памяти (`fb_read_rgba`) — RGBA, строка 0 = **верх** кадра |
-| GDI (текст) | `user32gdi32` доступен через `windows.h`: `CreateCompatibleDC`, `CreateCompatibleBitmap`, `TextOutW`, `GetPixel` — работает headless (проверено зондом `trash/probes/probe_hud.c`) |
+| GDI (текст) | `user32gdi32` доступен через `windows.h`: `CreateCompatibleDC`, `CreateCompatibleBitmap`, `TextOutW`, `GetPixel` — работает headless (проверено зондом `lab/probes/probe_hud.c`) |
 | Зонды вне продукного пути | в зонде с `GLFW_VISIBLE=false` (рендер в back buffer) readback даёт чёрный кадр — нужен FBO; `glGetInteger(GL_*_BINDING)` читает нули, а после `glUseProgram` появляется `0x500` (`GL_INVALID_ENUM`). Указатели GL совпадают с `glfwGetProcAddress`, но такая диагностика зонда **ненадёжна**; продукный путь (`--render` / `--selftest` через FBO) подтверждён пикселями |
 | Инструменты | `make`, `cmake`, `ninja`; нет clang/cl/vcpkg/glad/cglm/stb |
 | C++ | `g++` 14.2.0 есть (MSVC `cl` — нет). ImGui компилируется как C++; наружу отдаётся C ABI через `cimgui.h` |
@@ -115,6 +115,14 @@
 Ответственность остаётся в `main.c` (`sync_framebuffer_size`, `on_refresh`); камера
 по-прежнему получает аспект из размера цели в `draw_scene`.
 
+15. **Публичный репозиторий** (`dslf/pi-gyro-s64`, public, branch `main`): в git только источники —
+    `src/`, `shaders/`, `tests/`, `assets/` (включая `utah_teapot.obj`, переименован из
+    `utah-teapot.obj` ради ASCII-путей в зондах), `lab/probes/` (зонды как документация разработки,
+    их артефакты игнорирует `lab/.gitignore`), `deps/imgui` (источники MIT; `deps/imgui/build` не в git),
+    `docs/viewer-window.png` (исключение из `*.png`), README, LICENSE (MIT), Makefile,
+    AGENTS/PLAN/Roadmap/PROJECT_MEMORY. `trash/` не публикуется. На чистом клоне нужно
+    `make imgui` (статическая `libcimgui.a` не в git) и статический GLFW в тулчейне.
+
 ## 5. Текущий статус
 
 - M0–M6b: парсер, GL-загрузчик, камера/framing, шейдер, wireframe, скриншот, offscreen BMP, CLI — готово.
@@ -136,10 +144,11 @@
   каждый кадр (`sync_framebuffer_size`), перерисование в refresh-коллеке на WM_PAINT
   (модальный цикл Windows не дознается до конца drag'а). Числовая проверка:
   `grown target 256x192 -> 512x384: corner vs background max diff 0, black pixels in the newly
-  exposed area 0, silhouette coverage 27.54%` и зонд `trash/probes/probe_resize.ps1`
+  exposed area 0, silhouette coverage 27.54%` и зонд `lab/probes/probe_resize.ps1`
   (`repaints 3, fps 170.0, sizes 1264x861 -> 684x441, stderr пуст`) — обе зелёные.
-- Артефакты: кадры регрессии — `tests/out/` (git-ignored), исследовательские зонды и их логи —
-  `trash/probes/`, `trash/logs/` (git-ignored). В продукном каталоге артефактов нет.
+- Артефакты: кадры регрессии — `tests/out/` (git-ignored), бинари/кадры/логи зондов —
+  `lab/probes/` (git-ignored через `lab/.gitignore`, источники зондов трекаются), временный вывод —
+  `trash/` (не публикуется). В продукном каталоге артефактов нет.
 
 ## 6. Открытые решения и риски
 
