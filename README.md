@@ -13,19 +13,23 @@ C11 без внешних библиотек кроме GLFW и Dear ImGui. **П
 ## Что делает
 
 - Загрузка `.obj` (triangulation, позиции + нормали, bbox-центрирование и fit по bounding radius).
-- Orbit / pan / zoom camera, перспектива и ортография (`P`), auto-fit при загрузке.
+- Orbit / pan / zoom camera, перспектива и ортография (`O`), auto-fit при загрузке.
 - Шейдинг (ambient + diffuse + specular), билинейный filter для outline-сэмплеров.
 - **Outline всего силуэта** без readback: edge detection + polygon-offset (`GL_EQUAL`), 2-pass.
 - **Picking по face id**: `id`-атрибут + `discard` (главный pass) и `glReadPixels` для pick-pass;
-  nearest-first по глубине, `Tab`/`Shift+Tab` — шаг по ближайным граням к камере.
+  nearest-first по глубине. `Tab`/`Shift+Tab` — шаг по граням в порядке файла (циклический).
+- **Идентификация грани в HUD**: ordinal авторской грани, 1-based номера вершин из `f`-строки,
+  нормаль грани и нормали вершин (авторские `vn` либо computed, с оценкой отклонения).
 - **Подсветка выбранной грани** без readback: uniform + `discard`.
 - **HUD на Dear ImGui** (двухпанельный: статистика и подсказки), текст из атласа, контраст по WCAG.
 - **Resizing окна рисуется сразу**: framebuffer size перечитывается в кадре, не в callback'е
   (`glfwPollEvents` на Windows во время drag'a окна не вызывается — repaint идёт из `WM_PAINT`).
-- Offscreen-рендер в FBO и запись BMP/PNG без окна (`--shot`).
+- Offscreen-рендер в FBO и запись BMP без окна (`--render`, плюс `--yaw/--pitch/--fov/--ortho` для
+  воспроизводимых кадров).
 - **`--selftest`**: численные метрики вместо «на глаз» — coverage силуэта (> 2%), outline-пиксели
-  (2–35% кадра, контраст ≥ 600), pick-пиксель в 20 px от центра, отсутствие чёрных пикселей после
-  resize, gaps HUD ≤ 2 px, wrap подсказок. 8 разделов, 59 проверок, пороги относительные, чтобы
+  (2–35% кадра, контраст ≥ 600), pick-пиксель в 20 px от центра, identity грани (ordinal +
+  номера вершин + нормали), Tab-шаг, отсутствие чёрных пикселей после
+  resize, gaps HUD ≤ 2 px, wrap подсказок. 10 разделов, 60 проверок, пороги относительные, чтобы
   пережить другой GPU/AA.
 
 ## Стек
@@ -67,14 +71,16 @@ make test       # selftest + tests/run_tests.ps1
 | ЛКМ drag | orbit (yaw/pitch, pitch clamp ±85°) |
 | ПКМ drag | pan |
 | Колесо | zoom (clamp по размеру модели) |
-| `L` | подсветка всех граней (wireframe overlay) |
-| `W` | wireframe + shaded (кадр 1000×750, метрика coverage) |
-| `LWin+W` | wireframe-only offscreen 640×480, ratio к shaded ≥ 1.5× |
-| `T` | пересборка mesh с другой winding-конвенцией |
-| `P` | перспектива ↔ ортография |
-| `R` | reset камеры (auto-fit по bounding radius) |
-| `Tab` / `Shift+Tab` | шаг по граням, ближайшая к камере первой |
-| `H` | HUD on/off |
+| `Ctrl` + колесо | viewing angle (fov), не дистанция |
+| `[` / `]` | fov −5° / +5° (8–90°) |
+| `=` / `-` | zoom +1 / −1 |
+| `W` | wireframe overlay on/off |
+| `O` | перспектива ↔ ортография |
+| `R` | reset камеры (auto-fit по bounding radius) + снятие pin |
+| `S` | screenshot BMP текущего кадра |
+| hover | outline граней под курсором (nearest-first по глубине) |
+| ЛКМ click | pin грани; повторный click на той же — снять pin |
+| `Tab` / `Shift+Tab` | шаг по граням в порядке файла (циклический) |
 | `Esc` | выход |
 
 ## Проверка
