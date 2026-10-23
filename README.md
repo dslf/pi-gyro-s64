@@ -4,11 +4,13 @@
 C11 без внешних библиотек кроме GLFW и Dear ImGui. **Проект в стадии активной разработки**: это
 рабочая дев-ветка, релизов и tag'ов нет, API и hotkeys могут меняться.
 
-![Viewer: shaded teapot, silhouette outline, HUD panels](docs/viewer-window.png)
+![Viewer: shaded Utah teapot on a sky-lit background, three HUD panels (stats, settings widgets,
+keyboard hints)](docs/viewer-window.png)
 
-На скриншоте: Utah teapot (1250 граней), шейдинг с двумя light'ами, outline силуэта (edge-detected,
-`id`-атрибут вместо stencil), выбранная грань, две панели HUD (статистика + подсказки hotkeys) с
-маской под текстом.
+На скриншоте: реальное окно 1280×800 на дефолтных настройках (`fov 60 deg`, перспектива, `sky light` и
+`outline` включены). Utah teapot (1250 граней), шейдинг с двумя light'ами и небом, маска под текстом в
+трёх панелях HUD: статистика (слева сверху), панель виджетов Settings (слева, скроллable), подсказки
+hotkeys (внизу по центру). Outline не показан: грань под курсором не выбрана.
 
 ## Что делает
 
