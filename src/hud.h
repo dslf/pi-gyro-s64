@@ -66,7 +66,7 @@ typedef struct {
   float inj_x, inj_y;
   int   inj_down;          /* left button held */
   float inj_wheel;         /* injected wheel, >0 scrolls the content up */
-  float font_scale;        /* baked glyph size multiplier */
+  float font_px;           /* glyph size in pixels - the value settings.hud_font_px holds */
   int   info_visible;      /* 0 hides both information panels ([H]) */
 } hud;
 
@@ -94,8 +94,8 @@ void hud_settings_show(hud* h, int visible);
 int  hud_settings_visible(const hud* h);
 /* How many hint lines the last frame showed: 2 = all of them, fewer on a small frame. */
 int  hud_hint_lines(const hud* h);
-float hud_font_px(const hud* h);   /* effective glyph size in px: HUD_FONT_BASE * font_scale */
-float hud_font_base(void);         /* glyph size at scale 1.0, the px the scale multiplies */
+float hud_font_px(const hud* h);   /* effective glyph size in pixels, the settings key's unit */
+float hud_font_base(void);         /* the base px the ImGui atlas is baked from (scale 1.0) */
 /* Space left under the statistics card on the last frame; 0 means no room for the panel. */
 float hud_settings_room(const hud* h);
 /* Scroll offset of the settings window on the last frame (0 = list at the top). Non-zero also
@@ -123,8 +123,8 @@ void hud_settings_place(hud* h, float x, float y, float w);
 void hud_settings_settle(hud* h);
 /* Same, with an explicit width from settings.ini: called once after settings_load. */
 void hud_set_panel_width(hud* h, float w);
-/* Rebuild the glyph atlas at a new size scale; returns 1 when it was rebuilt. */
-int  hud_set_font_scale(hud* h, float scale);
+/* Rebuild the glyph atlas at a new pixel size; returns 1 when it was rebuilt. */
+int  hud_set_font_px(hud* h, float px);
 /* Panel background colour and opacity (0..1 sRGB floats), driven by settings. */
 void hud_set_panel_colors(hud* h, const float rgb[3], float alpha);
 

@@ -29,7 +29,7 @@ static const set_field FIELDS[] = {
   F(wireframe,       "wireframe",       "wireframe",         "surface", SET_BOOL,  0.0f, 1.0f,  0.0f,      NULL),
   F(bg_rgb,          "bg_rgb",          "background colour", "scene",   SET_RGB,   0.0f, 1.0f,  0.0f,      NULL),
   F(outline_rgb,     "outline_rgb",     "outline colour",    "scene",   SET_RGB,   0.0f, 1.0f,  0.0f,      NULL),
-  F(hud_font_scale,  "hud_font_scale",  "hud font scale",    "overlay", SET_FLOAT, 0.6f, 2.5f,  0.78f,     "%.2f"),
+  F(hud_font_px,     "hud_font_px",     "hud font size",     "overlay", SET_FLOAT, 6.0f, 32.0f, 13.26f,    "%.2f px"),
   F(hud_bg_alpha,    "hud_bg_alpha",    "panel opacity",     "overlay", SET_FLOAT, 0.0f, 1.0f,  0.94f,     "%.2f"),
   F(hud_info_visible,"hud_info_visible","info panels",       "overlay", SET_BOOL,  0.0f, 1.0f,  1.0f,      NULL),
   F(hud_help_w,      "hud_help_w",      "hint width cap",    "overlay", SET_FLOAT, 300.0f, 1200.0f, 760.0f, "%.0f px"),
@@ -87,6 +87,26 @@ static int str_eq_ci(const char* a, const char* b) {
 
 const set_field* settings_field_by_key(const char* key) {
   for (size_t i = 0; i < NFIELDS; i++) if (str_eq_ci(key, FIELDS[i].key)) return &FIELDS[i];
+  return NULL;
+}
+
+/* Keys an older version wrote and the current table no longer has: read-only aliases. The value is
+   multiplied before it lands in the current field, so the old `hud_font_scale = 0.78` still means
+   13.26 px. Saving never writes an alias - only the current key comes back out. */
+typedef struct {
+  const char* key;    /* legacy ini key */
+  const char* into;   /* current key the value is stored in */
+  float       mult;   /* value * mult, in the current field's unit */
+} set_alias;
+
+static const set_alias ALIASES[] = {
+  { "hud_font_scale", "hud_font_px", SETTINGS_FONT_BASE },
+};
+
+#define NALIASES (sizeof ALIASES / sizeof ALIASES[0])
+
+static const set_alias* alias_by_key(const char* key) {
+  for (size_t i = 0; i < NALIASES; i++) if (str_eq_ci(key, ALIASES[i].key)) return &ALIASES[i];
   return NULL;
 }
 
@@ -198,25 +218,56 @@ int settings_load(settings* s, const char* path, char* err, size_t errcap,
     char* key = trim(t);
     char* val = trim(eq + 1);
     const set_field* f = settings_field_by_key(key);
+    const set_alias* al = NULL;
     if (!f) {
-      fprintf(stderr, "settings: unknown key '%s' (line %d of '%s') - ignored\n", key, ln, path);
-      (*skipped)++;
-      continue;
+      al = alias_by_key(key);
+      if (!al) {
+        fprintf(stderr, "settings: unknown key '%s' (line %d of '%s') - ignored\n", key, ln, path);
+        (*skipped)++;
+        continue;
+      }
+      f = settings_field_by_key(al->into);
+    }
+    /* A legacy value is converted into the current unit before it is parsed, so the clamp range
+       and the readout are the current field's numbers, not the old multiplier's. */
+    double legacy_raw = 0.0;
+    char conv[64];
+    const char* valc = val;
+    if (al) {
+      char* end = NULL;
+      legacy_raw = strtod(val, &end);
+      if (end == val || *end) {
+        fprintf(stderr, "settings: legacy key '%s' = '%s' (line %d of '%s') is not a number - default kept\n",
+                key, val, ln, path);
+        (*skipped)++;
+        continue;
+      }
+      snprintf(conv, sizeof conv, "%.6f", legacy_raw * (double)al->mult);
+      valc = conv;
     }
     double shown = 0.0;
-    if (!parse_value(f, val, s, &shown)) {
+    if (!parse_value(f, valc, s, &shown)) {
       fprintf(stderr, "settings: bad value for '%s' = '%s' (line %d of '%s') - default kept\n",
               key, val, ln, path);
       (*skipped)++;
       continue;
     }
     if (f->type == SET_FLOAT) {
-      double raw = strtod(val, NULL);
+      double raw = strtod(valc, NULL);
       if (raw < f->min || raw > f->max) {
-        fprintf(stderr, "settings: '%s' = %g is outside [%g, %g] - clamped to %g\n",
-                key, raw, (double)f->min, (double)f->max, shown);
+        if (al)
+          fprintf(stderr, "settings: legacy '%s' = %g -> %g is outside [%g, %g] - clamped to %g\n",
+                  key, legacy_raw, raw, (double)f->min, (double)f->max, shown);
+        else
+          fprintf(stderr, "settings: '%s' = %g is outside [%g, %g] - clamped to %g\n",
+                  key, raw, (double)f->min, (double)f->max, shown);
         (*clamped)++;
       }
+    }
+    if (al) {
+      fprintf(stderr, "settings: legacy key '%s' = %g read as '%s' = %.6g (line %d of '%s')\n",
+              key, legacy_raw, al->into, shown, ln, path);
+      s->legacy_keys++;
     }
     (*applied)++;
   }
@@ -270,9 +321,9 @@ int settings_save(const settings* s, const char* path, char* err, size_t errcap)
 void settings_log(const settings* s, const char* origin) {
   printf("settings [%s]: fov %.0f deg %s, yaw %.1f pitch %.1f dist %.2fx fit, "
          "light %.2f x, sky %.2f/%.2f, shine %.0f specular %.2f, %s, "
-         "font %.2fx, panel alpha %.2f, info %s\n",
+         "font %.2f px, panel alpha %.2f, info %s\n",
          origin, s->fov_deg, s->ortho ? "orthographic" : "perspective",
          s->yaw_deg, s->pitch_deg, s->dist_scale, s->light_int, s->amb_top, s->amb_bot,
          s->shine, s->specular, s->wireframe ? "wireframe" : "shaded",
-         s->hud_font_scale, s->hud_bg_alpha, s->hud_info_visible ? "shown" : "hidden");
+         s->hud_font_px, s->hud_bg_alpha, s->hud_info_visible ? "shown" : "hidden");
 }

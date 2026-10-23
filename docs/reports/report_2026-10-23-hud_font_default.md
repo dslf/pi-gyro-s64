@@ -1,81 +1,91 @@
-# Отчёт шага — E5.T8: дефолт размера текста HUD (2026-10-23)
+# Отчёт: размер текста HUD как прямой px (E5.T8 + E5.T9), нормализация legacy-ключа, выход по `Q`
 
-**Цель.**Owner указал, что «нужный» размер текста HUD получается при `hud_font_scale` 0.73…0.80.
-Выяснить, что этот множитель даёт в пикселях, и сделать нужный размер дефолтом.
+Дата: 2026-10-23. Файл описывает весь шаг целиком (включая переименование ключа), поэтому
+предыдущая версия отчёта с `hud_font_scale` заменена этой.
 
-## Что выяснено (факты, не предположения)
+## Цель
 
-- HUD-текст рендерится одним шрифтом из атласа (`src/hud.c`), базовый размер задан
-  `HUD_FONT_BASE` и **равен 17 px** (`src/hud.c:21`, `hud_atlas_bake(..., HUD_FONT_BASE, ...)` в
-  `hud_init`). Дефолтный профиль `HUD_TEXT_DEFAULT` имеет `font_scale = 1.00` → 17 px.
-- Множитель применяется как `ImGui::FontSizeBaseMain = HUD_FONT_BASE * font_scale`
-  (`src/hud.c:134-136`, `ui->FontSizeBaseMain = text->font_base * text->font_scale`),
-  `DisplayFramebufferScale = 1.0` → `GetFontSize() = FontSizeBase × FontScaleMain`
-  (`deps/imgui/imgui/imgui.cpp:8957, 9324-9327`).
-- Диапазон owner'а = **пиксельный размер**: 0.73 → 12.41 px, 0.78 → 13.26 px, 0.80 → 13.60 px;
-  base 1 px → 17 px. Ключ `hud_font_scale` в `settings.ini` (диапазон 0.6…2.5, шаг 0.02 в
-  слайдере), env-override `HUD_FONT_SCALE`.
-- Зонд `lab/probes/probe_font.ps1` (реальный билд, `--selftest`, оверлей рисуется в offscreen-кадр):
+1. Размер текста HUD в настройках — **прямой px**, а не множитель: user asked for a direct font size.
+   Дефолт 13.26 px (`HUD_FONT_BASE 17 × 0.78`), диапазон `[6, 32] px`, шаг колеса 0.25 px.
+2. Ключ файла настроек называется `hud_font_px` (не `hud_font_scale`) — имя должно описывать то,
+   что написано в панели. Legacy-ключ читается, migrates при загрузке и печатает notice в stderr.
+3. Исправить расхождение README ≠ код: таблица обещала `Q` как выход, в `on_key` его не было.
 
-  | scale | px | чернила help-панели | coverage | контраст |
-  |---|---|---|---|---|
-  | 0.73 | 12.41 | 7052 px в 760×74 | 12.54% | 5.01:1 |
-  | 0.78 | 13.26 | 4405 px в 760×79 | 7.34% | 14.98:1 |
-  | 0.80 | 13.60 | 9293 px в 760×84 | 14.56% | 5.39:1 |
-  | 1.00 | 17.00 | 13426 px в 760×133 | 13.28% | 6.30:1 |
+## Сделано
 
-  Квадратичная зависимость чернил подтверждена: 7052/13426 = 0.525 против ожидаемых 0.73² = 0.533;
-  высота панели 74/133 = 0.556 — ниже линейного 0.730, потому что фиксированные отступы
-  (`ItemSpacing`, padding) не масштабируются вместе с текстом.
+**Документы (до кода, §0.8):**
+- `PROJECT_MEMORY.md` §2 — факт: текст HUD 13.26 px, ключ `hud_font_px`, диапазон `[6, 32] px`.
+  §4.21/§4.24 — env `HUD_FONT_PX`; §4.25 — дефолт 13.26 px и «нет scale-ключа в файле».
+  Новый §4.26 (ключ в px + legacy-алиас + нормализация файла при загрузке), новый §4.27
+  (`Q` как алиас выхода, причины зависания harness-скриптов). §5 — статус и счётчик selftest.
+- `Roadmap.md` — строка стека «текст HUD 13.26 px (ключ `hud_font_px`, ADR §4.26)», E5.T8 ✅,
+  новая строка E5.T9 ✅, E7.T3 ✅ с числами нового кадра.
+- `README.md` — caption скриншота (13.26 px), «24 ключа … `hud_font_px`», диапазон `6…32 px`,
+  11 разделов / 84 проверка, строка `Esc` / `Q`, нормализация legacy-ключа в §7.
 
-## Дефолт
+**Код:**
+- `src/settings.h/.c` — ключ `hud_font_px` вместо `hud_font_scale` (`FIELD(2, "hud_font_px", ...)`);
+  `legacy_alias()` (таблица `LEGACY_ALIASES`: `hud_font_scale → hud_font_px`), `legacy_hits`
+  в `settings_load`, `settings_legacy_keys()`; нормализация файла при загрузке.
+- `src/hud.c/.h` — `hud_font_px()` из `settings_get(2).f`, диапазон `[6, 32] px`,
+  `hud_set_font_px()`, wheel step 0.25 px; env-тюнинг `HUD_FONT_PX`; подсказка `Esc/Q - quit`;
+  строки `ok` печатаются с одинаковым отступом (`ok   `), чтобы счётчик проверок был однозначным.
+- `src/main.c` — env `HUD_FONT_PX`, startup-строка `font %.2f px`, `settings [startup]` в px;
+  `on_key`: выход по `GLFW_KEY_ESCAPE` **и** `GLFW_KEY_Q`; `controls:` печатает `Esc/Q quit`;
+  notice о legacy-ключе → stderr при `settings_load`; `settings_save` при штатном выходе.
+- `tests/py/settings_ini_smoke.py` — fixture и проверка `hud_font_px ∈ [6, 32]`, key count 24.
+- `lab/probes/probe_font.ps1` — env `HUD_FONT_PX` + прямая сверка `glyph px == HUD_FONT_PX`.
+- `lab/probes/probe_shot.ps1` — клавиши с реальным scan-code (`MapVirtualKeyW`), выход по `Q`.
 
-Выбран **0.78 → 13.26 px**: середина диапазона owner'а и лучшая читаемость по числам — при этом
-значении чернила текста имеют контраст 14.98:1 (против 5.01:1 при 12.41 и 6.30:1 при 13.60), то есть
-текст в этом размере rasterize'ится наиболее «dense». Порог контраста 3:1 и coverage 0.5%
-существующих проверок проходят при обоих дефолтах (0.78 и 1.00).
+## Проверено (команды из корня репозитория)
 
-## Сделано (файлы)
-
-| файл | что |
+| Команда | Фактический вывод |
 |---|---|
-| `src/settings.c` | `SETTINGS_DEFAULTS.hud_font_scale = 1.00f` → `0.78f` (комментарий: множитель над base 17 px) |
-| `src/hud.h` | новое объявление `float hud_font_base(void)` + комментарий про base × scale |
-| `src/hud.c` | `hud_font_base()` возвращает `HUD_FONT_BASE`; `HUD_TEXT_DEFAULT.font_scale = 0.78f` (с Комментарием «settings default, ADR 4.24») |
-| `src/main.c` | `hud_font_px()` — пиксельный размер; `hud_text_rect` считает высоту строки через пиксельный размер, а не через `font_scale`; новый selftest-блок «hud glyph size» (base × scale == профиль, сверка с дефолтом настроек; equality пропускается при `HUD_FONT_SCALE` override); тест колеса над панелью переведён на fixture 1280×520, потому что при новом дефолте список влезает в 1280×900 целиком и scroll-тест стал бы no-op |
+| `make imgui` | `make: Nothing to be done for 'imgui'` (деps уже собраны) |
+| `make` | одна строка gcc, **0 warning'ов** при `-Wall -Wextra` |
+| `./viewer.exe --selftest` | `selftest: PASS`, exit 0; **11 разделов, 84 строка `ok`, 0 FAIL** |
+| `make test` | `tests: PASS`, exit 0 (coverage 45.58 %, outline, picking, resize, wireframe 370.5 % < shaded 3467.3 %) |
+| `python tests/py/settings_ini_smoke.py` | `settings.ini: PASS 24 keys parsed … 0 unknown or duplicate keys` |
+| `python tests/py/hud_panel_probe.py` | exit 0 |
+| `lab/probes/probe_font.ps1` | `probe_font: PASS`: 13.26 / 21.25 / 6.75 px, ink 2790 / 4386 / 1603 px, width 754 / 1133 / 376 px, контраст 14.05 / 12.24 / 14.13, `glyph px == HUD_FONT_PX` |
+| `lab/probes/probe_shot.ps1` | `probe_shot: PASS`, exit 0: BMP 1280×800 (3072054 байт), coverage 45.58 %, чернила карточек 1573 / 32985 / 4413 px, `docs/viewer-window.png` 100150 байт, stderr пуст, **окно закрылось по `Q`, exit 0** |
 
-## Проверено (команды + вывод)
+Миграция legacy-ключа проверена **без окна** (headless `--idle-report 0.2`, окно не создаётся):
 
 ```
-make                                  -> gcc -O2 -std=c11 -Wall -Wextra, 0 warning
-./viewer.exe --selftest               -> selftest: PASS (exit 0)  11 разделов, 82 строка ok
-  ok   hud glyph size: base 17 px x scale 0.78 = 13.26 px == settings default 0.78
-  ok   HUD glyph ink: coverage 2.25%, contrast 14.13:1
-  ok   hud settings panel rect: 460 x 674 px
-  ok   hud settings tab: 460 x 19 px
-  ok   hud settings drag: rect y 56 -> 96 (dragged 40 px)
-  ok   hud wheel over panel: scroll_y 0.0 -> 65.0 px, room 361 px
-make test                             -> tests: PASS  exit 0
-python tests/py/settings_ini_smoke.py -> PASS 24 keys parsed, all values inside their ranges
-python tests/py/hud_panel_probe.py build/settings_panel.bmp -> exit 0 (строки текста 12 px)
-python tests/check_images.py image tests/out/out_teapot.bmp teapot -> checks: PASS (coverage 12.5%)
-python tests/check_images.py framing tests/out/out_cube_tall.bmp  -> checks: PASS
-powershell -File lab/probes/probe_font.ps1  -> probe_font: PASS (exit 0)
-powershell -File lab/probes/probe_resize.ps1 -> resize probe: PASS (fps 170, sizes 1264x861 684x441)
-powershell -File lab/probes/probe_shot.ps1   -> shot probe: PASS, docs/viewer-window.png 100071 байт
+run1 (файл содержит hud_font_scale = 0.76)
+  out: settings: loaded 'settings.ini' - 1 keys applied, 0 clamped to range, 0 ignored
+  out: settings: 'settings.ini' rewritten in current keys - 1 legacy key(s) converted
+  out: hud: font 12.92 px glyph (base 17 px) - atlas rebuilt on the next frame
+  err: settings: legacy key 'hud_font_scale' = 0.76 read as 'hud_font_px' = 12.92 (line 1 of 'settings.ini')
+  файл после run1: hud_font_px = 12.920000   (hud_font_scale отсутствует)
+run2 (тот же файл)
+  out: settings: loaded 'settings.ini' - 24 keys applied, 0 clamped to range, 0 ignored
+  out: hud: font 12.92 px glyph (base 17 px)
+  err: пусто   ← notice печатается один раз, не каждый запуск
 ```
 
-Кадр README переснят на новом дефолте (1280×800, дефолты без выбранной грани); подпись README
-исправлена одновременно: старый текст говорил `fov 60 deg` (дефолт 45°) и «скроллable» (при 13.26 px
-список из 21 виджента помещается при высоте 800 px целиком).
+selftest-блок миграции: `legacy hud_font_scale 0.73 -> hud_font_px 12.41 … 1 legacy key counted`,
+`after save: 24 keys applied (want 24), 0 ignored, 0 legacy keys left`.
+
+## Harness-фиксы (не продукт)
+
+- `PostMessage(WM_KEYDOWN, vk, 0)` доходит до GLFW, но scan-code в lParam = 0 → `GLFW_KEY_UNKNOWN`,
+  поэтому posted-клавиши раньше не срабатывали; зонд теперь берёт scan-code из `MapVirtualKeyW`.
+- `PostMessage(WM_LBUTTONDOWN)` доходит и попадает в виджет под физическим курсором — posted-клики
+  в проверках не используются (именно они записали в файл `hud_font_px = 13.11` и `visible = true`).
+- Интерактивные скрипты имеют таймаут и `Kill` в `finally`; проверка миграции переведена на headless.
 
 ## Риски / следующий шаг
 
-- Диапазон слайдера 0.6…2.5 остаётся; owner может выбрать 0.73 или 0.80 — это легальные значения,
-  контраст в них 5.0…5.4:1 (порог 3:1 проходит).
-- `tests/py/hud_panel_probe.py` требует путь к bmp как аргумент — вызывается с `build/settings_panel.bmp`.
-- `--render`/`--selftest` используют встроенный профиль (0.78); живой `settings.ini` даёт ту же
-  величину, поэтому метрики совпадают с интерактивом.
-- Визуальная сверка нового кадра требует owner'ского описания (AGENTS §0.9) — если нужно, попроси.
+- `HUD_FONT_SCALE` (env) остаётся legacy-тюнингом: он пересчитывается в px по той же формуле.
+- Кадр README переснят: подсказки теперь содержат `Esc/Q - quit`, PNG 100150 байт.
+- Следующий кандидат — E5.T10 (слайдеры панели в px-ось целиком: позиции виджетов vs font px).
 
-**Статус Roadmap:** E5.T8 → ✅.
+## Статус Roadmap
+
+- E5.T8 → ✅ (дефолт 13.26 px, env `HUD_FONT_PX`, фикстура 1280×520)
+- E5.T9 → ✅ (ключ `hud_font_px`, legacy-миграция + нормализация файла, 84 строка `ok`)
+- E7.T3 → ✅ (кадр README обновлён под px-ось)
+
+Жду одобрение (коммит / пуш). Коммитов в этом шаге ещё нет.

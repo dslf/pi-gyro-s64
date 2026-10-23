@@ -15,11 +15,13 @@
 #include <float.h>
 
 /* Readability profile: ImGui glyphs at font scale 1 are far cleaner than the old GDI atlas.
-   Env overrides (HUD_FONT_SCALE, HUD_W, HUD_HELP_W) exist for tuning - the pixel selftest
+   Env overrides (HUD_FONT_PX, HUD_STATS_W, HUD_SETTINGS_W, HUD_HELP_W) exist for tuning - the pixel selftest
    reports WCAG contrast, ink coverage and the ink-to-panel-edge gap for whatever profile is
    in effect. Heights are never set: each panel auto-fits its text, so there are no empty rows. */
-#define HUD_FONT_BASE 17.0f       /* px at scale 1.0; settings.hud_font_scale multiplies it */
-#define HUD_FONT_SCALE 0.78f      /* built-in default = settings_default: 13.26 px glyph (ADR PROJECT_MEMORY 4.24) */
+#define HUD_FONT_BASE 17.0f       /* px baked into the atlas at scale 1.0; settings.hud_font_px is a px size */
+#define HUD_FONT_PX   13.26f      /* built-in default = settings_default (ADR PROJECT_MEMORY 4.24/4.26) */
+#define HUD_FONT_PX_MIN 4.0f      /* sane bounds for the env knob; the settings widget has its own range */
+#define HUD_FONT_PX_MAX 64.0f
 #define HUD_MARGIN 8.0f
 #define HUD_STATS_W 0.0f    /* 0 = auto width; HUD_W pins it when set */
 #define HUD_HELP_MIN_W 300.0f   /* floor: width normally comes from the hint strings themselves */
@@ -33,7 +35,7 @@
 static const char* HUD_HINT_KEYS =
   "LMB drag - rotate   RMB drag - pan   wheel - zoom   Ctrl+wheel - viewing angle   [ ] - viewing angle   "
   "= / - zoom   W - wireframe   O - ortho / perspective   R - reset camera and pin   S - screenshot   "
-  "H - information panels   P - settings panel   Esc - quit";
+  "H - information panels   P - settings panel   Esc/Q - quit";
 static const char* HUD_HINT_PICK =
   "hover - outlines the triangle under the cursor   click - pin it   click again - release   "
   "Tab / Shift+Tab - step through faces   the selection is listed in the statistics card";
@@ -72,14 +74,24 @@ int hud_init(hud* h, void* window, char* err, size_t errcap) {
   }
   h->ctx = ctx;
 
-  const float scale = env_f("HUD_FONT_SCALE", HUD_FONT_SCALE);
+  /* The knob is a pixel size; the legacy env name stays a multiplier over HUD_FONT_BASE so an
+     existing tuning script keeps working. */
+  float px = env_f("HUD_FONT_PX", HUD_FONT_PX);
+  const char* legacy = getenv("HUD_FONT_SCALE");
+  if (legacy && *legacy) px = (float)atof(legacy) * HUD_FONT_BASE;
+  if (px < HUD_FONT_PX_MIN || px > HUD_FONT_PX_MAX) {
+    fprintf(stderr, "hud: font size %.2f px is outside [%g, %g] - clamped to %.2f px\n",
+            px, (double)HUD_FONT_PX_MIN, (double)HUD_FONT_PX_MAX,
+            (double)(px < HUD_FONT_PX_MIN ? HUD_FONT_PX_MIN : HUD_FONT_PX_MAX));
+    px = px < HUD_FONT_PX_MIN ? HUD_FONT_PX_MIN : HUD_FONT_PX_MAX;
+  }
   const float sw = env_f("HUD_STATS_W", HUD_STATS_W);
-  h->font_scale = scale;
+  h->font_px = px;
 
   ImGuiStyle* st = igGetStyle();
   igStyleColorsDark(st);
   st->FontSizeBase = HUD_FONT_BASE;
-  st->FontScaleMain = scale;
+  st->FontScaleMain = px / HUD_FONT_BASE;
   st->Colors[ImGuiCol_WindowBg] = (ImVec4){ 0.08f, 0.10f, 0.14f, 0.94f };
   st->Colors[ImGuiCol_Text] = (ImVec4){ 0.95f, 0.97f, 1.00f, 1.00f };
   /* Tight info card: no border, small rounding, compact line spacing. */
@@ -131,8 +143,8 @@ int hud_init(hud* h, void* window, char* err, size_t errcap) {
   h->settings_visible = 1;
   h->settings_placed = 0;
   h->settings_w = env_f("HUD_SETTINGS_W", HUD_SETTINGS_W);
-  printf("hud: imgui %s, font scale %.2f (%.2f px glyph), stats width %s, help %.0f px wide (heights auto-fit), settings panel %.0f px wide\n",
-         igGetVersion(), scale, hud_font_px(h), sw > 0.0f ? "pinned by HUD_W" : "auto-fit to text", hw, h->settings_w);
+  printf("hud: imgui %s, font %.2f px glyph (base %.0f px), stats width %s, help %.0f px wide (heights auto-fit), settings panel %.0f px wide\n",
+         igGetVersion(), hud_font_px(h), HUD_FONT_BASE, sw > 0.0f ? "pinned by HUD_STATS_W" : "auto-fit to text", hw, h->settings_w);
   return 0;
 }
 
@@ -474,8 +486,8 @@ int hud_settings_visible(const hud* h) { return h->settings_visible && h->settin
 int hud_hint_lines(const hud* h) { return h->hint_lines; }
 
 /* Effective glyph size in px: the style bakes FontSizeBase and FontScaleMain and
-   io.DisplayFramebufferScale is 1, so GetFontSize() = HUD_FONT_BASE * font_scale. */
-float hud_font_px(const hud* h) { return h->font_scale * HUD_FONT_BASE; }
+   io.DisplayFramebufferScale is 1, so GetFontSize() = HUD_FONT_BASE * FontScaleMain = font_px. */
+float hud_font_px(const hud* h) { return h->font_px; }
 
 /* The base glyph size this module bakes at scale 1.0 - exposed so the selftest can check that
    the settings default and the HUD profile describe the same pixel size. */
@@ -533,24 +545,29 @@ void hud_set_panel_width(hud* h, float w) {
   h->settings_settled = 1;
 }
 
-/* Re-bake the glyph atlas at a new size. ImGui scales AddFontDefault by FontScaleMain, so the
-   scale is applied to the style first and the fonts are then replaced: with the
-   renderer-has-textures backend the atlas is rebuilt inside the next NewFrame, so no explicit
-   Build() call exists (and none is needed) in this vendored ImGui. */
-int hud_set_font_scale(hud* h, float scale) {
-  if (!h->ctx || scale <= 0.0f) return 0;
-  if (fabsf(scale - h->font_scale) < 0.01f) return 0;
+/* Re-bake the glyph atlas at a new pixel size. ImGui scales AddFontDefault by FontScaleMain, so
+   the requested px is expressed as px / HUD_FONT_BASE in the style and the fonts are then
+   replaced: with the renderer-has-textures backend the atlas is rebuilt inside the next NewFrame,
+   so no explicit Build() call exists (and none is needed) in this vendored ImGui. */
+int hud_set_font_px(hud* h, float px) {
+  if (!h->ctx || px <= 0.0f) return 0;
+  if (px < HUD_FONT_PX_MIN || px > HUD_FONT_PX_MAX) {
+    fprintf(stderr, "hud: font size %.2f px is outside [%g, %g] - ignored\n",
+            px, (double)HUD_FONT_PX_MIN, (double)HUD_FONT_PX_MAX);
+    return 0;
+  }
+  if (fabsf(px - h->font_px) < 0.01f) return 0;
   ImGuiStyle* st = igGetStyle();
-  st->FontScaleMain = scale;
+  st->FontScaleMain = px / HUD_FONT_BASE;
   ImGuiIO* io = igGetIO_Nil();
   ImFontAtlas_ClearFonts(io->Fonts);
   if (!ImFontAtlas_AddFontDefault(io->Fonts, NULL)) {
-    fprintf(stderr, "hud: font scale %.2f - default font not rebuilt, keeping %.2f\n", scale, h->font_scale);
+    fprintf(stderr, "hud: font size %.2f px - default font not rebuilt, keeping %.2f px\n", px, h->font_px);
     return -1;
   }
-  h->font_scale = scale;
+  h->font_px = px;
   h->text_ready = io->FontDefault != NULL;
-  printf("hud: font scale %.2f (%.2f px glyph) - atlas rebuilt on the next frame\n", scale, hud_font_px(h));
+  printf("hud: font %.2f px glyph (base %.0f px) - atlas rebuilt on the next frame\n", px, HUD_FONT_BASE);
   return 1;
 }
 

@@ -27,7 +27,9 @@ SPEC = {
     "wireframe":            ("b", 0.0, 1.0),
     "bg_rgb":               ("r", 0.0, 1.0),
     "outline_rgb":          ("r", 0.0, 1.0),
-    "hud_font_scale":       ("f", 0.6, 2.5),
+    # px glyph size; the range is looser than the C widget's so the spec check survives a
+    # deliberate env override. The legacy hud_font_scale key is read-only and never saved.
+    "hud_font_px":          ("f", 4.0, 48.0),
     "hud_bg_alpha":         ("f", 0.0, 1.0),
     "hud_info_visible":     ("b", 0.0, 1.0),
     "hud_help_w":           ("f", 300.0, 1200.0),

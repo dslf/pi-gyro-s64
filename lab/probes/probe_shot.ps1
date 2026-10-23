@@ -15,7 +15,7 @@ public static class W {
   [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr h, StringBuilder sb, int max);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
-  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+  [DllImport("user32.dll")] public static extern uint MapVirtualKeyW(uint vk, uint mapType);
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
   public delegate bool EnumWindowsProc(IntPtr h, IntPtr a);
   public static IntPtr Find(string pfx) {
@@ -29,9 +29,17 @@ public static class W {
     }), IntPtr.Zero);
     return hit;
   }
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
   public static void Key(IntPtr h, byte vk) {
-    PostMessage(h, 0x0100, (IntPtr)vk, (IntPtr)0);   // WM_KEYDOWN
-    PostMessage(h, 0x0101, (IntPtr)vk, (IntPtr)0);   // WM_KEYUP
+    // GLFW translates WM_KEYDOWN through the hardware scan code in lParam bits 16..23: lParam=0
+    // arrives as GLFW_KEY_UNKNOWN and on_key never sees the key. MapVirtualKeyW gives the scan
+    // code of this keyboard layout (MAPVK_VK_TO_VSC, then the extended variant if that is 0).
+    uint scan = MapVirtualKeyW(vk, 0);
+    if (scan == 0) scan = MapVirtualKeyW(vk, 4);
+    IntPtr down = (IntPtr)(1L | ((ulong)scan << 16));
+    IntPtr up = (IntPtr)(1L | ((ulong)scan << 16) | (1L << 32));
+    PostMessage(h, 0x0100, (IntPtr)vk, down);   // WM_KEYDOWN
+    PostMessage(h, 0x0101, (IntPtr)vk, up);     // WM_KEYUP
   }
   public static void Tap(byte vk) {                 // injected hardware key, fallback path
     keybd_event(vk, 0, 0, IntPtr.Zero);
@@ -84,8 +92,8 @@ if (-not $got) {
 }
 if (-not $got) { Fail 'no screenshot.bmp after VK S'; $p.Kill(); exit 1 }
 Ok ("screenshot.bmp written by the app's own S hotkey ($((Get-Item $shot).Length) bytes)")
-[W]::Key($h, 0x1B)                               # VK Escape -> the app quits itself
-if (-not $p.WaitForExit(6000)) { Fail 'app did not exit after Escape'; $p.Kill() }
+[W]::Key($h, 0x51)                               # VK 'Q' -> the app quits itself (Esc/Q quit)
+if (-not $p.WaitForExit(6000)) { Fail 'app did not exit after Q'; $p.Kill() }
 $out = $p.StandardOutput.ReadToEnd(); $err = $p.StandardError.ReadToEnd()
 Write-Output ("exit: " + $p.ExitCode)
 if ($p.ExitCode -ne 0) { Fail ("exit code " + $p.ExitCode) }

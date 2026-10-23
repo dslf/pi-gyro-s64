@@ -142,7 +142,7 @@ static void apply_settings(app* a) {
     float bgc[4], txtc[4];
     hud_colors(&a->hudl, bgc, txtc);
     hud_set_panel_colors(&a->hudl, bgc, s->hud_bg_alpha);
-    hud_set_font_scale(&a->hudl, s->hud_font_scale);
+    hud_set_font_px(&a->hudl, s->hud_font_px);
     hud_set_info_visible(&a->hudl, s->hud_info_visible);
     hud_settings_show(&a->hudl, s->hud_settings_visible);
     hud_set_panel_width(&a->hudl, s->settings_w);
@@ -244,7 +244,7 @@ static void on_key(GLFWwindow* win, int key, int scancode, int action, int mods)
   (void)scancode;
   if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
 
-  if (key == GLFW_KEY_ESCAPE) glfwSetWindowShouldClose(win, 1);
+  if (key == GLFW_KEY_ESCAPE || key == GLFW_KEY_Q) glfwSetWindowShouldClose(win, 1);
   else if (key == GLFW_KEY_H) {
     int vis = !hud_info_visible(&a->hudl);
     hud_set_info_visible(&a->hudl, vis);
@@ -613,6 +613,19 @@ static int run_interactive(app* a, const char* model_path) {
   else
     printf("settings: loaded '%s' - %d keys applied, %d clamped to range, %d ignored\n",
            SETTINGS_FILE, applied, clamped, skipped);
+
+  /* A legacy file is rewritten in current keys immediately: the alias is read-only, so an old
+     key left on disk would be re-migrated and re-reported on every start. The widgets are not
+     marked dirty by this - the values the user sees are unchanged. */
+  if (sres == SETTINGS_OK && a->set.legacy_keys > 0) {
+    char werr[160] = "";
+    if (settings_save(&a->set, SETTINGS_FILE, werr, sizeof werr) == SETTINGS_ERROR)
+      fprintf(stderr, "settings: '%s' not rewritten - %s (legacy keys kept for this run)\n",
+              SETTINGS_FILE, werr);
+    else
+      printf("settings: '%s' rewritten in current keys - %d legacy key(s) converted\n",
+             SETTINGS_FILE, a->set.legacy_keys);
+  }
   a->ap_fov = -1.0f;
   a->ap_dist_scale = -1.0f;
   a->ap_ortho = -1;
@@ -624,7 +637,7 @@ static int run_interactive(app* a, const char* model_path) {
     float bgc[4], txtc[4];
     hud_colors(&a->hudl, bgc, txtc);
     a->set.hud_bg_alpha = bgc[3];
-    a->set.hud_font_scale = a->hudl.font_scale;
+    a->set.hud_font_px = hud_font_px(&a->hudl);
     a->set.hud_help_w = a->hudl.help_w;
     a->set.hud_stats_w = a->hudl.stats_w;
     a->set.hud_info_visible = a->hudl.info_visible;
@@ -642,7 +655,7 @@ static int run_interactive(app* a, const char* model_path) {
 
   printf("resize: live repaint - frame size read from the window every frame, redraw from WM_PAINT\n");
   printf("controls: LMB rotate | RMB pan | wheel zoom | Ctrl+wheel fov | [ ] fov | O ortho/perspective\n");
-  printf("          W wire | R reset | S screenshot | Tab / Shift+Tab step faces | hover outlines, click pins | Esc quit\n");
+  printf("          W wire | R reset | S screenshot | Tab / Shift+Tab step faces | hover outlines, click pins | Esc/Q quit\n");
   printf("          H information panels | P settings panel\n");
   printf("settings: '%s' beside the binary - RMB click over the panel shows/hides it, drag moves it,\n", SETTINGS_FILE);
   printf("          release over it pins the width; the wheel and picking stay theirs while the cursor is inside\n");
@@ -1081,7 +1094,7 @@ static void expect_bmp_orientation(int* fails) {
 
   int ok = mismatch == 0 && fh == h && bpp == 24 && hdr[0] == 'B' && hdr[1] == 'M';
   if (ok) {
-    printf("  ok  upright: file row 0 = bottom rgb %d,%d,%d, row %d = top rgb %d,%d,%d\n",
+    printf("  ok   upright: file row 0 = bottom rgb %d,%d,%d, row %d = top rgb %d,%d,%d\n",
            rows[0][2], rows[0][1], rows[0][0], h - 1, rows[h - 1][2], rows[h - 1][1], rows[h - 1][0]);
   } else {
     printf("  FAIL bmp orientation: %d mismatched pixels, first at file row %d x %d = rgb %d,%d,%d "
@@ -1670,26 +1683,28 @@ static void settings_selftest(app* a, int* fails) {
   settings_default(&d);
   int defaults_ok = d.fov_deg == 60.0f && d.hud_settings_visible == 1 && d.sky_visible == 1 &&
                     d.outline_visible == 1 && d.settings_w == 460.0f && d.hud_bg_alpha == 0.94f &&
-                    fabsf(d.hud_font_scale - 0.78f) < 1e-6f && !settings_dirty(&d);
-  printf("  %s defaults: fov %.0f, panel %d px wide, shown %d, sky %d, outline %d, hud font scale %.2f\n",
+                    fabsf(d.hud_font_px - 13.26f) < 1e-6f && !settings_dirty(&d);
+  printf("  %s defaults: fov %.0f, panel %d px wide, shown %d, sky %d, outline %d, hud font %.2f px\n",
          defaults_ok ? "ok  " : "FAIL", d.fov_deg, (int)d.settings_w, d.hud_settings_visible,
-         d.sky_visible, d.outline_visible, d.hud_font_scale);
+         d.sky_visible, d.outline_visible, d.hud_font_px);
   if (!defaults_ok) (*fails)++;
 
   /* The HUD profile baked before settings.ini and the settings default must be the same pixel
      size, or --render/--selftest metrics and the interactive panel would disagree (ADR 4.24).
-     HUD_FONT_SCALE is a tuning knob that overrides the baked profile on purpose, so the equality
-     against the settings default is only asserted when no override is in effect. */
-  const int env_override = getenv("HUD_FONT_SCALE") != NULL;
+     HUD_FONT_PX is a tuning knob that overrides the baked profile on purpose, so the equality
+     against the settings default is only asserted when no override is in effect. The settings key
+     is a px size now, so the readout is in px; SETTINGS_FONT_BASE is what the legacy
+     hud_font_scale key multiplied, and it must be the same base the atlas is baked from. */
+  const int env_override = getenv("HUD_FONT_PX") != NULL || getenv("HUD_FONT_SCALE") != NULL;
   float px = hud_font_px(&a->hudl);
-  int font_agrees = fabsf(px - hud_font_base() * a->hudl.font_scale) < 0.01f &&
-                    (env_override || fabsf(a->hudl.font_scale - d.hud_font_scale) < 1e-6f);
+  int font_agrees = hud_font_base() == SETTINGS_FONT_BASE &&
+                    (env_override || fabsf(px - d.hud_font_px) < 0.01f);
   if (env_override)
-    printf("  %s hud glyph size: base %.0f px x profile %.2f = %.2f px (HUD_FONT_SCALE override, settings default %.2f)\n",
-           font_agrees ? "ok  " : "FAIL", hud_font_base(), a->hudl.font_scale, px, d.hud_font_scale);
+    printf("  %s hud glyph size: %.2f px (HUD_FONT_PX/HUD_FONT_SCALE override, settings default %.2f px)\n",
+           font_agrees ? "ok  " : "FAIL", px, d.hud_font_px);
   else
-    printf("  %s hud glyph size: base %.0f px x scale %.2f = %.2f px == settings default %.2f\n",
-           font_agrees ? "ok  " : "FAIL", hud_font_base(), d.hud_font_scale, px, d.hud_font_scale);
+    printf("  %s hud glyph size: %.2f px == settings default %.2f px (atlas base %.0f px)\n",
+           font_agrees ? "ok  " : "FAIL", px, d.hud_font_px, hud_font_base());
   if (!font_agrees) (*fails)++;
 
   /* Roundtrip over every key: save then read back into a fresh struct. */
@@ -1751,6 +1766,46 @@ static void settings_selftest(app* a, int* fails) {
            "fov %.0f, panel %.0f px\n", ok ? "ok  " : "FAIL", applied, expect, clamped, expect_clamp,
            skipped, expect_skip, b.fov_deg, b.settings_w);
     if (!ok) (*fails)++;
+  }
+
+  /* An ini written by the previous version carries `hud_font_scale`, a multiplier over the atlas
+     base. It must land in the current key as the same pixels, and saving must not write the
+     legacy key back. */
+  FILE* lf = fopen("build/settings_selftest_legacy.ini", "w");
+  if (!lf) {
+    printf("  FAIL cannot write build/settings_selftest_legacy.ini\n");
+    (*fails)++;
+  } else {
+    fprintf(lf, "hud_font_scale = 0.73\n");
+    fclose(lf);
+    settings lg;
+    int lapp = 0, lcl = 0, lsk = 0;
+    int lrc = settings_load(&lg, "build/settings_selftest_legacy.ini", err, sizeof err,
+                            &lapp, &lcl, &lsk);
+    const float want_px = SETTINGS_FONT_BASE * 0.73f;   /* 12.41 px - the smallest size read on screen */
+    const int legacy_ok = lrc == SETTINGS_OK && lapp == 1 && lcl == 0 && lsk == 0 &&
+                          lg.legacy_keys == 1 &&
+                          fabsf(lg.hud_font_px - want_px) < 1e-3f;
+    printf("  %s legacy hud_font_scale 0.73 -> hud_font_px %.2f (want %.2f px, atlas base %.0f px, %d legacy key counted)\n",
+           legacy_ok ? "ok  " : "FAIL", lg.hud_font_px, want_px, hud_font_base(), lg.legacy_keys);
+    if (!legacy_ok) (*fails)++;
+
+    /* Rewrite through settings_save: the legacy key is gone, so a re-read applies exactly the
+       current keys and the pixel size survives. */
+    settings ls; settings_default(&ls); ls.hud_font_px = lg.hud_font_px;
+    if (settings_save(&ls, "build/settings_selftest_legacy.ini", err, sizeof err) != 0) {
+      printf("  FAIL rewriting the legacy file through settings_save\n");
+      (*fails)++;
+    } else {
+      settings lb;
+      int a2 = 0, c2 = 0, s2 = 0;
+      settings_load(&lb, "build/settings_selftest_legacy.ini", err, sizeof err, &a2, &c2, &s2);
+      const int rew_ok = a2 == (int)nf && s2 == 0 && lb.legacy_keys == 0 &&
+                         fabsf(lb.hud_font_px - want_px) < 1e-3f;
+      printf("  %s after save: %d keys applied (want %zu), %d ignored, %d legacy keys left, hud font %.2f px\n",
+             rew_ok ? "ok  " : "FAIL", a2, nf, s2, lb.legacy_keys, lb.hud_font_px);
+      if (!rew_ok) (*fails)++;
+    }
   }
 
   /* A file that is not there is not an error: defaults survive. */

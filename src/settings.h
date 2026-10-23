@@ -29,7 +29,7 @@ typedef struct {
   float shine, specular;
   int   wireframe;
   float bg_rgb[3], outline_rgb[3];
-  float hud_font_scale, hud_bg_alpha;
+  float hud_font_px, hud_bg_alpha;
   int   hud_info_visible;
   float hud_help_w, hud_stats_w;
   float settings_w;
@@ -37,9 +37,15 @@ typedef struct {
   int   sky_visible;
   int   outline_visible;
   int   dirty;
+  int   legacy_keys;  /* legacy alias keys read from the file; not a settings field, never saved */
 } settings;
 
 #define SETTINGS_FILE "settings.ini"   /* next to the exe, git-ignored (ADR §4.21) */
+
+/* Glyph base in px that the legacy key `hud_font_scale` multiplied. An ini written by an older
+   version therefore still means the same pixels when read as `hud_font_px = scale * base`.
+   src/hud.c HUD_FONT_BASE is the same number, and the selftest asserts the two agree. */
+#define SETTINGS_FONT_BASE 17.0f
 
 #define SETTINGS_OK 0        /* file read, values applied */
 #define SETTINGS_MISSING 1   /* no file yet: defaults kept, not an error */
@@ -47,7 +53,10 @@ typedef struct {
 
 void  settings_default(settings* s);
 /* Loads over the defaults. applied/clamped/skipped count the lines that were used, clamped to
-   the range, and rejected (unknown key, bad value, no '=') - each rejection prints its key. */
+   the range, and rejected (unknown key, bad value, no '=') - each rejection prints its key.
+   A legacy alias (ALIASES[]) is converted into the current unit and counted in s->legacy_keys,
+   so the caller can rewrite the file in current keys instead of re-migrating it on every start.
+   Never marks the struct dirty. */
 int   settings_load(settings* s, const char* path, char* err, size_t errcap,
                     int* applied, int* clamped, int* skipped);
 int   settings_save(const settings* s, const char* path, char* err, size_t errcap);
