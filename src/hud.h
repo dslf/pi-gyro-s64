@@ -49,8 +49,23 @@ typedef struct {
   float settings_x, settings_y;
   float settings_w;        /* pinned width in px; 0 = auto-fit to the widgets */
   float settings_room;     /* space left under the statistics card, 0 = no panel this frame */
+  int   settings_collapsed;/* 1 = the last frame drew the title-bar tab instead of the widgets */
   int   hint_lines;        /* hint lines that fit this frame (a small frame drops the tail) */
   int   settings_settled;  /* a widget was released after an edit -> worth persisting */
+  /* Set on the frame a title-bar drag moved the window: the log line is printed once the
+     button is released, not on every frame of the drag. */
+  int   settings_moved;
+  /* 1 = ImGui is holding a drag (slider, scrollbar or title bar) that started inside the HUD.
+     It stays set while the cursor wanders outside the panel - which is the whole point: the
+     end of a long slider drag happens over the 3D field. */
+  int   mouse_busy;
+  float settings_scroll;   /* scroll_y of the settings window, 0 = widget list at the top */
+  int   settings_pos_forced; /* next frame applies settings_x/y with ImGuiCond_Always */
+  /* Mouse state injected into ImGui instead of the GLFW backend (selftest only). */
+  int   inj_active;
+  float inj_x, inj_y;
+  int   inj_down;          /* left button held */
+  float inj_wheel;         /* injected wheel, >0 scrolls the content up */
   float font_scale;        /* baked glyph size multiplier */
   int   info_visible;      /* 0 hides both information panels ([H]) */
 } hud;
@@ -81,6 +96,24 @@ int  hud_settings_visible(const hud* h);
 int  hud_hint_lines(const hud* h);
 /* Space left under the statistics card on the last frame; 0 means no room for the panel. */
 float hud_settings_room(const hud* h);
+/* Scroll offset of the settings window on the last frame (0 = list at the top). Non-zero also
+   means the widget list is taller than the room and the panel is scrolled down. */
+float hud_settings_scroll(const hud* h);
+/* 1 while ImGui holds a drag that started in a HUD widget (slider, scrollbar, title bar). The
+   cursor can be anywhere - including over the 3D field - so main.c keeps the camera out of a
+   gesture the HUD is still owning. */
+int  hud_mouse_busy(const hud* h);
+/* Feeds mouse state to ImGui on the next hud_frame, bypassing the GLFW backend: no real cursor
+   exists over an offscreen framebuffer, and the drag-ownership / wheel-scroll regressions need
+   a cursor that leaves the window while the button is still held. wheel >0 scrolls up and is one
+   frame of input; a negative x or y stops injecting and hands the mouse back to the backend. */
+void hud_warp_mouse(hud* h, double x, double y, int left_down, float wheel);
+/* Collapse or expand the settings window exactly the way the title-bar triangle does: the state
+   lives in ImGui and applies on the next frame. hud_settings_collapsed() reports what the last
+   frame actually drew. The selftest drives this path because a collapse makes igBegin return
+   false - the crash regression is an abort there, not a wrong pixel. */
+void hud_settings_collapse(hud* h, int collapsed);
+int hud_settings_collapsed(const hud* h);
 /* Move the settings panel (window pixels, pixel-y from the top); w <= 0 keeps the current
    width. The drag gesture in main.c owns the position. */
 void hud_settings_place(hud* h, float x, float y, float w);

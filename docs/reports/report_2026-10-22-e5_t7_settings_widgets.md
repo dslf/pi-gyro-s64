@@ -146,3 +146,100 @@ python tests/py/settings_ini_smoke.py build/settings_selftest_bad.ini
 
 `E5.T7` → ✅ (acceptance: таблица ключей как единственный источник, roundtrip, битые ключи,
 кламп, гейт мыши, пиксельная метрика панели, `--render`/`--selftest` на дефолтах).
+
+## Post-release фикс 2026-10-22: сворачивание панели роняло процесс
+
+**Симптом (от owner'а):** «когда я сварачиваю settings через кнопку треугольник, программа
+крашится `Assertion failed: (0) && "Missing End()", file imgui/imgui.cpp, line 11325`».
+
+**Причина.** ImGui требует, чтобы `End()` вызывался даже когда `Begin()` вернул `false`
+(свёрнутое/скрытое окно не открывается, но тик фрейма всё равно должен закрыться —
+`imgui.cpp:7611`: «collapsed or hidden windows return false»). Три места `hud_draw` имели
+`if (!igBegin(...)) return;` — при сворачивании `End()` не вызывался, следующий `igNewFrame`
+срабатывал assert и `abort()`.
+
+**Исправление (`src/hud.c`).** Во всех трёх панелях структура стала
+`if (igBegin(...)) { содержимое } igEnd();`; содержимое (глифы, `igItemRect`, мышь-гейт,
+`hud_settings_last_rect`) выполняется только когда окно открыто. `src/hud.h` — комментарий
+к контракту гейта.
+
+**Проверка.** Новый шаг в разделе `settings.ini` (`src/main.c`): свернуть → кадр → замерить
+вкладку → развернуть → кадр; процесс не абортится, значит `End()` отработал:
+
+```text
+ok   fold the panel: tab 460 x 23 px at (8,64) where the panel was 460 x 679 px,
+     mouse over the tab 1 (End() ran - the frame did not abort)
+ok   unfold again: rect 460 x 679 px, was 460 x 679 px before the fold
+```
+
+Вкладка остаётся под курсором (`mouse over the tab 1`) — гейт мыши не «теряет» панель при
+сворачивании. Команды: `make` без warning'ов; `./viewer.exe --selftest` → `selftest: PASS`,
+exit 0 (11 разделов, 78 строк `ok`, `FAIL` нет); `powershell -File tests/run_tests.ps1` →
+`tests: PASS`; `python tests/py/settings_ini_smoke.py` → PASS (24 ключа).
+
+**Попутно исправлено (класс «документ ≠ код», AGENTS §0.8):**
+- таблица hotkeys в `README.md` содержала строку «`/shees` — перечитать `settings.ini`» — такого
+  хоткея в `src/main.c` никогда не было (`Select-String 'GLFW_KEY_'` даёт Esc, H, P, W, O, `[`,
+  `]`, R, S, `=`, `-`, Tab). Строка убрана, добавлены `H` и `Tab` над панелью;
+- число проверок в `README.md` расходилось в трёх местах (10/60, 11/69, 12/75) — теперь 11
+  разделов / 78 строк `ok` + команда, которая это пересчитывает из вывода (на сегодня —
+  11 разделов / 81 строка `ok`, см. раздел ниже);
+- `settings.ini` (пишется рядом с `viewer.exe`) не был в `.gitignore` — добавлен;
+- **важно для честности предыдущего отчёта:** в командах проверки шага E5.T7 я использовал
+  флаги `--settings-file <path>` и `--width/--height`, которых в парсере `src/main.c` нет
+  (реальный размер — `--size <w> <h>`). Такие запуски падали с `unknown option` и exit 2,
+  т.е. не проверяли ничего; зелёные выводы в том отчёте пришли из `--selftest` и `make test`.
+  CLI-флаг для пути к `settings.ini` — открытая задача (см. `PROJECT_MEMORY.md` §4.21: путь
+  один, корень cwd).
+
+## Post-release фикс 2026-10-22: мышь панели настроек (drag, колесо, заголовок)
+
+**Симптом (от owner'а):** «когда скролишь окно вниз, зажимая мышь на ползунке, и выходишь за
+пределы окна — модель начинает вращаться; колесо мыши не работает для прокрутки настроек; окно
+настроек нельзя перемещать за заголовок».
+
+**Причины (три независимых).**
+1. Гейт `mouse_in_settings` (`src/main.c`) сравнивал курсор только с rect'ом панели. Как только
+   курсор выходил за окно, гейт открывался — и остаток drag'а ползунка превращался в orbit.
+2. На окне висел `ImGuiWindowFlags_NoScrollWithMouse`, а `handle_scroll` в `main.c` безусловно
+   отдавал колео зуму камеры: список виджетов не прокручивался никогда.
+3. `hud_frame` каждый кадр вызывал `igSetNextWindowPos(..., ImGuiCond_Always)`. ImGui применяет
+   move окна в `NewFrame` до нашего `Begin`, поэтому всегдашний `Cond_Always` отменял перетаскивание
+   за заголовок (`io.ConfigWindowsMoveFromTitleBarOnly`, `imgui.cpp:5521`).
+
+**Исправление.**
+- `src/hud.c` / `src/hud.h`: новый `hud_mouse_busy()` — признак активного ImGui-жеста
+  (`igGetActiveID() != 0`); снят `NoScrollWithMouse`; окно больше не прокручивается колесом
+  камеры; `draw_settings_window` решает «форсить ли позицию» **до** `SetNextWindowPos` — при
+  зажатой ЛКМ над панелью (rect предыдущего кадра) включается `settings_placed`, и ImGui владеет
+  позицией; координаты читаются из окна обратно в `settings.ini` (`panel moved by the title bar`);
+  новый `hud_settings_scroll()` для численной проверки колеса.
+- `src/main.c`: `mouse_in_settings` = rect **или** активный жест; `handle_scroll` над панелью не
+  трогает зум; новый `hud_warp_mouse()` — инъекция курсора/кнопки/колеса в очередь событий ImGui
+  (`ImGuiIO_AddMousePosEvent` / `AddMouseButtonEvent` / `AddMouseWheelEvent`), иначе headless-
+  кадр не имеет ни курсора, ни жеста, и такие проверки невозможно написать.
+
+**Проверка (фактический вывод `./viewer.exe --selftest`, раздел `settings.ini`):**
+
+```text
+ok   wheel over the panel scrolls the widget list: scroll_y 0.0 -> 85.0 px (rect 170 x 679, room 679 px)
+ok   panel moves by its title bar: rect y 64 -> 104 (40 px for a 40 px drag), gesture held busy 1, after release busy 0
+ok   scrollbar drag outside the panel keeps the camera out: held busy 1 gate 0, after release busy 0
+     (rect 8..178 x 104..783, cursor 1279 x 899)
+```
+
+Порядок кадров важен: колесо ImGui маршрутизирует по `g.HoveredWindow`, который считается в
+`EndFrame` предыдущего кадра, поэтому перед шагом нужен кадр с курсором над панелью без колеса.
+Целевые точки — заголовок (`rect.y + 8`) и scrollbar (`rect.x1 − 6`): у title-bar drag'а окно идёт
+за курсором, поэтому «выход за окно» меряется именно scrollbar'ом, который окно не двигает.
+
+Регрессия: `make` без warning'ов; `./viewer.exe --selftest` → `selftest: PASS`, exit 0
+(11 разделов, 81 строка `ok`); `powershell -File tests/run_tests.ps1` → `tests: PASS`;
+`python tests/py/settings_ini_smoke.py` → PASS (24 ключа). Пороги существующих проверок не
+менялись; панель после тестов возвращается к layout'у (`hud_settings_place`), поэтому fold/unfold
+и метрики чернил меряют обычную раскладку.
+
+**Риски / открытое.** Drag позиции численно не сверяется с `settings.ini` на реальном окне
+(только в headless-кадре); колесо над панелью в интерактиве проверяется только гейтом. Колесо
+над карточкой статистики/подсказками по-прежнему уходит в зум — у тех панелей нет scrollbar'а.
+`docs/viewer-window.png` старее текущего кадра (README §6.2) — нужен интерактивный capture.

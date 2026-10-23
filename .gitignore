@@ -4,6 +4,9 @@ viewer.exe
 *.o
 *.pdb
 
+# Per-user widget state beside the binary (written by the viewer, read back on start)
+settings.ini
+
 # Generated test output (see tests/out/)
 tests/out/
 

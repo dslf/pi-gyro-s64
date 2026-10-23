@@ -187,11 +187,12 @@ static void on_scroll(GLFWwindow* win, double sx, double sy) {
   (void)sx;
   /* Ctrl+wheel changes the viewing angle instead of the distance: that is what
      makes perspective strong (wide fov, close eye) or flat (narrow fov, far eye). */
-  /* The wheel over the settings panel belongs to the widgets (dragging a slider is not a
-     zoom gesture); everywhere else it stays a zoom or a fov change. */
+  /* The wheel over the settings panel scrolls the widget list (ImGui owns it there); a gesture
+     ImGui is still holding also belongs to it. Everywhere else the wheel stays zoom, or fov with
+     Ctrl. */
   double cx = 0.0, cy = 0.0;
   glfwGetCursorPos(win, &cx, &cy);
-  if (mouse_in_settings(a, cx, cy)) {
+  if (mouse_in_settings(a, cx, cy) || hud_mouse_busy(&a->hudl)) {
     a->lastx = cx;
     a->lasty = cy;
     a->dirty = 1;
@@ -376,8 +377,10 @@ static void handle_mouse(app* a) {
     return;
   }
   if (!right) a->rpress = 0;
-  /* While the cursor is over the panel its widgets own hover, picking and the wheel. */
-  if (over_panel) { a->lastx = lx; a->lasty = ly; return; }
+  /* The mouse belongs to the HUD while it is over the panel *or* while ImGui still holds a
+     gesture started there: a slider or a scrollbar drag keeps its active item after the cursor
+     leaves the window, and without this the tail of that drag would rotate the model. */
+  if (over_panel || hud_mouse_busy(&a->hudl)) { a->lastx = lx; a->lasty = ly; return; }
 
   if (!left && !right) {
     /* A left press that never moved is a pick: it pins the triangle, or unpins
@@ -1916,6 +1919,118 @@ static void settings_selftest(app* a, int* fails) {
   const int gate_ok = inside == 1 && outside == 0;
   printf("  %s mouse gate: inside %d, outside %d\n", gate_ok ? "ok  " : "FAIL", inside, outside);
   if (!gate_ok) (*fails)++;
+
+  /* The wheel over the panel scrolls the widget list. At a narrow width the list is taller than
+     the room, so a wheel step must move the content. An offscreen framebuffer has no real
+     pointer, so the cursor and the wheel are injected into ImGui's event queue (hud_warp_mouse).
+     Before this existed the panel carried NoScrollWithMouse and the wheel did nothing there.
+     The wheel itself is not measured here - scroll_y is, which is the state the user sees. */
+  const float w_saved = a->set.settings_w;
+  hud_set_panel_width(&a->hudl, 170.0f);
+  draw_scene(a, &fb);
+  int nx0 = 0, ny0 = 0, nx1 = 0, ny1 = 0;
+  hud_rect(&a->hudl, HUD_PANEL_SETTINGS, &nx0, &ny0, &nx1, &ny1);
+  hud_warp_mouse(&a->hudl, (nx0 + nx1) * 0.5, (ny0 + ny1) * 0.5, 0, 0.0f);
+  draw_scene(a, &fb);
+  const float scroll_top = hud_settings_scroll(&a->hudl);
+  hud_warp_mouse(&a->hudl, (nx0 + nx1) * 0.5, (ny0 + ny1) * 0.5, 0, -1.0f);
+  draw_scene(a, &fb);
+  const float scroll_down = hud_settings_scroll(&a->hudl);
+  const int scrolled = scroll_down > scroll_top + 5.0f;
+  printf("  %s wheel over the panel scrolls the widget list: scroll_y %.1f -> %.1f px "
+         "(rect %d x %d, room %.0f px)\n", scrolled ? "ok  " : "FAIL",
+         (double)scroll_top, (double)scroll_down, nx1 - nx0, ny1 - ny0,
+         (double)hud_settings_room(&a->hudl));
+  if (!scrolled) (*fails)++;
+
+  /* A drag owns the mouse: while a HUD gesture is held the camera must stay out of it. The title
+     bar is grabbed first - its geometry is known and it is the window's own hit area - and the
+     panel follows the cursor, so ownership here is measured as the active gesture (busy), which
+     is the state main.c gates on. */
+  hud_warp_mouse(&a->hudl, nx0 + 30.0, ny0 + 8.0, 1, 0.0f);
+  draw_scene(a, &fb);
+  hud_warp_mouse(&a->hudl, nx0 + 30.0, ny0 + 48.0, 1, 0.0f);
+  draw_scene(a, &fb);
+  int my0 = 0, my1 = 0, mx0 = 0, mx1 = 0;
+  hud_rect(&a->hudl, HUD_PANEL_SETTINGS, &mx0, &my0, &mx1, &my1);
+  const int moved_px = my0 - ny0;
+  const int held_busy = hud_mouse_busy(&a->hudl);
+  hud_warp_mouse(&a->hudl, nx0 + 30.0, ny0 + 48.0, 0, 0.0f);
+  draw_scene(a, &fb);
+  draw_scene(a, &fb);
+  const int freed_busy = hud_mouse_busy(&a->hudl);
+  const int drag_ok = moved_px >= 30 && moved_px <= 50 && held_busy == 1 && freed_busy == 0;
+  printf("  %s panel moves by its title bar: rect y %d -> %d (%d px for a 40 px drag), "
+         "gesture held busy %d, after release busy %d\n", drag_ok ? "ok  " : "FAIL",
+         ny0, my0, moved_px, held_busy, freed_busy);
+  if (!drag_ok) (*fails)++;
+
+  /* The case the owner hit: a widget drag whose cursor ends up outside the window. The scrollbar
+     is the deterministic target for it - unlike the title bar it does not drag the window along,
+     so the cursor really leaves the rect and the rect-only gate alone would hand the gesture to
+     the orbit. */
+  hud_warp_mouse(&a->hudl, mx1 - 6.0, my0 + 60.0, 1, 0.0f);
+  draw_scene(a, &fb);
+  hud_warp_mouse(&a->hudl, (double)PW - 1.0, (double)PH - 1.0, 1, 0.0f);
+  draw_scene(a, &fb);
+  const int out_busy = hud_mouse_busy(&a->hudl);
+  const int out_gate = mouse_in_settings(a, (double)PW - 1.0, (double)PH - 1.0);
+  hud_warp_mouse(&a->hudl, (double)PW - 1.0, (double)PH - 1.0, 0, 0.0f);
+  draw_scene(a, &fb);
+  draw_scene(a, &fb);
+  const int out_freed = hud_mouse_busy(&a->hudl);
+  const int own_ok = out_busy == 1 && out_gate == 0 && out_freed == 0;
+  printf("  %s scrollbar drag outside the panel keeps the camera out: held busy %d gate %d, "
+         "after release busy %d (rect %d..%d x %d..%d, cursor %d x %d)\n",
+         own_ok ? "ok  " : "FAIL", out_busy, out_gate, out_freed,
+         mx0, mx1, my0, my1, PW - 1, PH - 1);
+  if (!own_ok) (*fails)++;
+
+  /* Put the panel back where the layout placed it and hand the mouse back to the GLFW backend,
+     so the checks below measure the normal layout again. */
+  hud_warp_mouse(&a->hudl, -1.0, -1.0, 0, 0.0f);
+  draw_scene(a, &fb);
+  hud_settings_place(&a->hudl, (float)rx0, (float)ry0, w_saved);
+  draw_scene(a, &fb);
+
+  /* The title-bar triangle folds the window: Begin then returns false while the window stays
+     open, and ImGui still requires the matching End() (deps/imgui/imgui/imgui.h:7611) - without
+     it the process aborts inside ImGui ("Missing End()",
+     deps/imgui/imgui/imgui.cpp:11325), which is exactly the crash the collapse button caused.
+     A regression here fails the whole run (an abort is a non-zero exit), and the tab geometry is
+     what the mouse gate has to keep away from the camera. */
+  hud_settings_collapse(&a->hudl, 1);
+  draw_scene(a, &fb);
+  int cx0 = 0, cy0 = 0, cx1 = 0, cy1 = 0;
+  const int collapsed = hud_settings_collapsed(&a->hudl);
+  if (!collapsed || !hud_rect(&a->hudl, HUD_PANEL_SETTINGS, &cx0, &cy0, &cx1, &cy1) || cx1 <= cx0) {
+    printf("  FAIL folded panel reports no tab (collapsed %d, rect %d x %d)\n", collapsed,
+           cx1 - cx0, cy1 - cy0);
+    (*fails)++;
+  } else {
+    /* ImGui sizes a collapsed window to its title bar (deps/imgui/imgui/imgui.cpp:7956): same
+       top-left corner, same width, a fraction of the height - and the mouse still belongs to the
+       tab, so dragging over it does not orbit the camera. */
+    const int tab_gate = mouse_in_settings(a, (double)(cx0 + cx1) / 2.0, (double)(cy0 + cy1) / 2.0);
+    const int tab_ok = cy1 > cy0 && cy1 - cy0 <= (ry1 - ry0) / 4 && cx0 == rx0 && cy0 == ry0 &&
+                       cx1 == rx1 && cy1 <= PH && tab_gate == 1;
+    printf("  %s fold the panel: tab %d x %d px at (%d,%d) where the panel was %d x %d px, "
+           "mouse over the tab %d (End() ran - the frame did not abort)\n",
+           tab_ok ? "ok  " : "FAIL", cx1 - cx0, cy1 - cy0, cx0, cy0, rx1 - rx0, ry1 - ry0, tab_gate);
+    if (!tab_ok) (*fails)++;
+  }
+
+  /* Unfolding must bring the widget list back at the same rect, so a fold/unfold cycle leaves the
+     layout exactly where the pixel checks above measured it. */
+  hud_settings_collapse(&a->hudl, 0);
+  draw_scene(a, &fb);
+  int ex0 = 0, ey0 = 0, ex1 = 0, ey1 = 0;
+  hud_rect(&a->hudl, HUD_PANEL_SETTINGS, &ex0, &ey0, &ex1, &ey1);
+  const int unfold_ok = !hud_settings_collapsed(&a->hudl) && ex0 == rx0 && ey0 == ry0 &&
+                        abs(ex1 - rx1) <= 2 && abs(ey1 - ry1) <= 2;
+  printf("  %s unfold again: rect %d x %d px, was %d x %d px before the fold\n",
+         unfold_ok ? "ok  " : "FAIL", ex1 - ex0, ey1 - ey0, rx1 - rx0, ry1 - ry0);
+  if (!unfold_ok) (*fails)++;
 
   /* Hide it through the ini value and re-render: the panel area must become bare background. */
   a->set.hud_settings_visible = 0;

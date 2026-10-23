@@ -101,6 +101,10 @@ int hud_init(hud* h, void* window, char* err, size_t errcap) {
   /* No saved layout: every run starts with the panel where the code puts it. */
   ImGuiIO* io = igGetIO_Nil();
   io->IniFilename = NULL;
+  /* A window is grabbed by its title bar only. Without this the settings panel would follow the
+     cursor whenever the left button is pressed anywhere inside it - including on a slider, where
+     the drag is the widget's own gesture (deps/imgui/imgui/imgui.h: io.ConfigWindowsMoveFromTitleBarOnly). */
+  io->ConfigWindowsMoveFromTitleBarOnly = 1;
   ImFont* font = ImFontAtlas_AddFontDefault(io->Fonts, NULL);
   if (!font) {
     snprintf(err, errcap, "hud_init: default font not created (imgui %s)", igGetVersion());
@@ -147,13 +151,19 @@ void hud_shutdown(hud* h) {
 /* An info card that hugs its text: no title bar, no input focus, no dragging, position pinned
    by pivot (0,0 = top-left corner at the point, 0.5/1 = bottom-centre at the point). Width is
    set by the API; a zero height component is not "set by API" for ImGui
-   (deps/imgui/imgui/imgui.cpp:7743), so AlwaysAutoResize fits the height to the text. */
+   (deps/imgui/imgui/imgui.cpp:7743), so AlwaysAutoResize fits the height to the text.
+   The return value only says whether items should be submitted: Begin can succeed on a collapsed
+   window and still return false, and ImGui requires an End() in that case too
+   (deps/imgui/imgui/imgui.h:7611: "You always need to call ImGui::End() even if false is
+   returned"), so callers draw conditionally and End unconditionally. NoCollapse because these
+   cards have no title bar to toggle from - a hidden card would have no way back. */
 static int begin_panel(const char* title, float x, float y, float pw, float pivot_x, float pivot_y) {
   igSetNextWindowPos((ImVec2){ x, y }, ImGuiCond_Always, (ImVec2){ pivot_x, pivot_y });
   igSetNextWindowSize((ImVec2){ pw, 0.0f }, ImGuiCond_Always);
   if (!igBegin(title, NULL, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                                 ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
-                                ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_AlwaysAutoResize))
+                                ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoCollapse |
+                                ImGuiWindowFlags_AlwaysAutoResize))
     return 0;
   return 1;
 }
@@ -196,39 +206,78 @@ static int widget_field(settings* s, const set_field* f) {
   return igIsItemDeactivatedAfterEdit() ? 1 : 0;
 }
 
-/* The settings window: grouped widgets over the field table, no wheel scrolling (the mouse wheel
-   over it must stay a zoom gesture), auto-fit height, pinned width. When the room under the
-   statistics card is smaller than the widget list, ImGui caps the height and shows a scrollbar -
-   the widgets stay reachable, the panel never crosses into the hints. */
+/* The settings window: grouped widgets over the field table, pinned width, auto-fit height capped
+   to the room under the statistics card. The mouse belongs to ImGui inside this window: the wheel
+   scrolls the widget list, the title bar moves the window, the widgets edit settings.
+   The collapse triangle makes Begin return false (deps/imgui/imgui/imgui.h:7611), so the widget
+   list is skipped but End() still runs: skipping it aborts the process inside ImGui
+   ("Missing End()", deps/imgui/imgui/imgui.cpp:11325). While collapsed, ImGui sizes the window to
+   its title bar (deps/imgui/imgui/imgui.cpp:7956), so the rect recorded here is the tab the user
+   clicks to expand again - and main.c keeps the mouse over that tab away from the camera.
+   Position: hud_frame pins the window under the statistics card until the user grabs it. Forcing
+   the position with ImGuiCond_Always every frame makes the title-bar drag impossible (ImGui moves
+   the window, the next frame snaps it back), so after the first grab the position is read back
+   from the window and hud_settings_place() is the only thing that pins it again. */
 static void draw_settings_window(hud* h, settings* s, float pw, float room) {
-  igSetNextWindowPos((ImVec2){ h->settings_x, h->settings_y }, ImGuiCond_Always,
-                     (ImVec2){ 0.0f, 0.0f });
+  /* Ownership of the position transfers to the user the moment the left button is held with the
+     cursor over the panel (the rect ImGui used on the previous frame): from then on hud_frame does
+     not pin it. This is checked before SetNextWindowPos below - forcing the position with
+     ImGuiCond_Always while ImGui is moving the window is exactly what cancels the title-bar drag
+     (deps/imgui/imgui/imgui.h: io.ConfigWindowsMoveFromTitleBarOnly, and the move is applied in
+     NewFrame before our Begin). */
+  if (!h->settings_placed && igIsMouseDown_Nil(ImGuiMouseButton_Left)) {
+    const ImVec2 m = igGetMousePos();
+    if (m.x >= (float)h->settings_rect[0] && m.x <= (float)h->settings_rect[2] &&
+        m.y >= (float)h->settings_rect[1] && m.y <= (float)h->settings_rect[3])
+      h->settings_placed = 1;
+  }
+  if (!h->settings_placed || h->settings_pos_forced)
+    igSetNextWindowPos((ImVec2){ h->settings_x, h->settings_y }, ImGuiCond_Always,
+                       (ImVec2){ 0.0f, 0.0f });
+  h->settings_pos_forced = 0;
   /* Width is pinned by the drag gesture, height fits the widgets but never past the room left
      under the statistics card: constraining both axes to the same width keeps the panel
-     one-column. Content that does not fit is clipped by the window, not painted over the hints. */
+     one-column. Content that does not fit is scrolled by the wheel, not painted over the hints. */
   if (pw > 0.0f)
     igSetNextWindowSizeConstraints((ImVec2){ pw, 0.0f }, (ImVec2){ pw, room }, NULL, NULL);
-  if (!igBegin("Settings", NULL,
-               ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
-               ImGuiWindowFlags_NoScrollWithMouse | ImGuiWindowFlags_NoSavedSettings))
-    return;
-
-  const char* group = NULL;
-  const size_t nfields = settings_field_count();
-  for (size_t i = 0; i < nfields; i++) {
-    const set_field* f = settings_field(i);
-    if (!group || strcmp(group, f->group) != 0) {
-      if (group) igSeparator();
-      igText("%s", f->group);
-      group = f->group;
+  const int open = igBegin("Settings", NULL,
+                           ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
+                           ImGuiWindowFlags_NoSavedSettings);
+  h->settings_collapsed = open ? 0 : 1;
+  if (open) {
+    const char* group = NULL;
+    const size_t nfields = settings_field_count();
+    for (size_t i = 0; i < nfields; i++) {
+      const set_field* f = settings_field(i);
+      if (!group || strcmp(group, f->group) != 0) {
+        if (group) igSeparator();
+        igText("%s", f->group);
+        group = f->group;
+      }
+      if (widget_field(s, f)) h->settings_settled = 1;
     }
-    if (widget_field(s, f)) h->settings_settled = 1;
+    igSeparator();
+    igTextDisabled("RMB click - hide, drag it - move/resize, P - show again   wheel - scroll the list");
+    h->settings_scroll = igGetScrollY();
+  } else {
+    h->settings_scroll = 0.0f;
   }
-
-  igSeparator();
-  igTextDisabled("RMB click - hide, drag it - move/resize, P - show again   scrollbar - rows below the fold");
+  const ImVec2 win = igGetWindowPos();
+  if (win.x != h->settings_x || win.y != h->settings_y) {
+    h->settings_x = win.x;
+    h->settings_y = win.y;
+    h->settings_placed = 1;
+    h->settings_moved = 1;
+  }
   record_rect(h->settings_rect);
   igEnd();
+  /* One line per gesture, printed when the button is released - a drag moves the window on every
+     frame and logging each of them buries the rest of the console. */
+  if (h->settings_moved && !igIsMouseDown_Nil(ImGuiMouseButton_Left)) {
+    printf("settings: panel moved by the title bar to (%d, %d)\n",
+           (int)h->settings_x, (int)h->settings_y);
+    h->settings_moved = 0;
+  }
 }
 
 void hud_frame(hud* h, int w, int h_px, const hud_info* info, settings* s) {
@@ -244,11 +293,25 @@ void hud_frame(hud* h, int w, int h_px, const hud_info* info, settings* s) {
      caller's w/h is authoritative here. */
   io->DisplaySize = (ImVec2){ (float)w, (float)h_px };
   io->DisplayFramebufferScale = (ImVec2){ 1.0f, 1.0f };
+  /* Selftest input: an offscreen framebuffer has no real cursor, so the caller injects the mouse
+     state into the event queue after the GLFW backend has filled its own - queued events are
+     consumed by igNewFrame in queue order, so the injected ones win.
+     mouse_busy is read before igNewFrame: ImGui clears the active id inside NewFrame when the
+     button was released, so the value is exactly "a HUD gesture was still held when this frame
+     started", which is what main.c needs to keep the camera out of it. */
+  if (h->inj_active) {
+    ImGuiIO_AddMousePosEvent(io, h->inj_x, h->inj_y);
+    ImGuiIO_AddMouseButtonEvent(io, ImGuiMouseButton_Left, h->inj_down != 0);
+    if (h->inj_wheel != 0.0f) ImGuiIO_AddMouseWheelEvent(io, 0.0f, h->inj_wheel);
+  }
+  h->mouse_busy = igGetActiveID() != 0 ? 1 : 0;
+  h->inj_wheel = 0.0f; /* a wheel step is one frame of input, not a held state */
   igNewFrame();
 
   /* Statistics panel: pinned at the top-left corner, width fixed, height = the lines it has. */
-  if (h->info_visible && begin_panel("hud_stats", h->margin, h->margin, h->stats_w, 0.0f, 0.0f)) {
-    if (info) {
+  if (h->info_visible) {
+    const int open = begin_panel("hud_stats", h->margin, h->margin, h->stats_w, 0.0f, 0.0f);
+    if (open && info) {
       char line[256];
       snprintf(line, sizeof line, "%s  fov %.0f deg  dist %.2f  fps %.1f",
                info->projection ? info->projection : "?", info->fov_deg, info->cam_dist, info->fps);
@@ -300,28 +363,32 @@ void hud_frame(hud* h, int w, int h_px, const hud_info* info, settings* s) {
   if (pw < 64.0f) pw = 64.0f;
   float room = (float)h_px - 2.0f * h->margin;
   if (h->info_visible && h->stats_rect[3] > 0) room -= h->stats_rect[3] + h->margin;
-  if (h->info_visible && begin_panel("hud_help", (float)w * 0.5f, (float)h_px - h->margin, pw, 0.5f, 1.0f)) {
-    const ImGuiStyle* st = igGetStyle();
-    const float content_w = pw - 2.0f * st->WindowPadding.x;
-    const float room_inner = room - 2.0f * st->WindowPadding.y;
-    const char* hints[2] = { HUD_HINT_KEYS, HUD_HINT_PICK };
-    float used = 0.0f;
-    int shown = 0;
-    igPushTextWrapPos(0.0f);
-    for (int i = 0; i < 2; i++) {
-      /* Conservative height of this hint at the panel width: the unwrapped text width divided by
-         the content width (word wrapping rounds up), times the line height, plus the gap between
-         items. Deliberately pessimistic - underestimating would paint over the statistics card. */
-      ImVec2 sz = igCalcTextSize(hints[i], NULL, false, -1.0f);
-      float lines = content_w > 0.0f && sz.x > content_w ? (float)ceil(sz.x / content_w) : 1.0f;
-      float need = lines * sz.y;
-      if (used + need > room_inner) break;
-      igTextUnformatted(hints[i], NULL);
-      used += need + st->ItemSpacing.y;
-      shown++;
+  if (h->info_visible) {
+    const int open = begin_panel("hud_help", (float)w * 0.5f, (float)h_px - h->margin, pw, 0.5f, 1.0f);
+    if (!open) h->hint_lines = 0;   /* no items submitted this frame: nothing to measure */
+    if (open) {
+      const ImGuiStyle* st = igGetStyle();
+      const float content_w = pw - 2.0f * st->WindowPadding.x;
+      const float room_inner = room - 2.0f * st->WindowPadding.y;
+      const char* hints[2] = { HUD_HINT_KEYS, HUD_HINT_PICK };
+      float used = 0.0f;
+      int shown = 0;
+      igPushTextWrapPos(0.0f);
+      for (int i = 0; i < 2; i++) {
+        /* Conservative height of this hint at the panel width: the unwrapped text width divided by
+           the content width (word wrapping rounds up), times the line height, plus the gap between
+           items. Deliberately pessimistic - underestimating would paint over the statistics card. */
+        ImVec2 sz = igCalcTextSize(hints[i], NULL, false, -1.0f);
+        float lines = content_w > 0.0f && sz.x > content_w ? (float)ceil(sz.x / content_w) : 1.0f;
+        float need = lines * sz.y;
+        if (used + need > room_inner) break;
+        igTextUnformatted(hints[i], NULL);
+        used += need + st->ItemSpacing.y;
+        shown++;
+      }
+      igPopTextWrapPos();
+      h->hint_lines = shown;
     }
-    igPopTextWrapPos();
-    h->hint_lines = shown;
     record_rect(h->help_rect);
     igEnd();
   } else {
@@ -354,10 +421,12 @@ void hud_frame(hud* h, int w, int h_px, const hud_info* info, settings* s) {
     } else {
       memset(h->settings_rect, 0, sizeof h->settings_rect);
       h->settings_room = 0.0f;
+      h->settings_collapsed = 0;
     }
   } else {
     memset(h->settings_rect, 0, sizeof h->settings_rect);
     h->settings_room = 0.0f;
+    h->settings_collapsed = 0;
   }
 
   igRender();
@@ -396,13 +465,45 @@ int  hud_info_visible(const hud* h) { return h->info_visible; }
 void hud_settings_show(hud* h, int visible) {
   h->settings_visible = visible ? 1 : 0;
   if (!visible) memset(h->settings_rect, 0, sizeof h->settings_rect);
+  /* Collapse state is left alone on purpose: [P] shows the window, and a window the user folded
+     with the title-bar tab comes back as that tab - the same behaviour as any other ImGui
+     window, and hud_settings_collapse() is the only place that changes it. Forcing an expand
+     here would reopen the panel on every orbit, because orbit marks the settings dirty. */
 }
 int hud_settings_visible(const hud* h) { return h->settings_visible && h->settings_rect[2] > h->settings_rect[0]; }
 int hud_hint_lines(const hud* h) { return h->hint_lines; }
 float hud_settings_room(const hud* h) { return h->settings_room; }
+float hud_settings_scroll(const hud* h) { return h->ctx ? h->settings_scroll : 0.0f; }
+int hud_mouse_busy(const hud* h) { return h->ctx ? h->mouse_busy : 0; }
+
+void hud_warp_mouse(hud* h, double x, double y, int left_down, float wheel) {
+  if (!h->ctx) return;
+  if (x < 0.0 || y < 0.0) { /* same convention as io.MousePos: negative means no mouse at all */
+    h->inj_active = 0;
+    h->inj_down = 0;
+    h->inj_wheel = 0.0f;
+    return;
+  }
+  h->inj_active = 1;
+  h->inj_x = (float)x;
+  h->inj_y = (float)y;
+  h->inj_down = left_down;
+  h->inj_wheel = wheel;
+}
+
+/* Collapse or expand the way the title-bar triangle does: the state lives in ImGui, which queues
+   the toggle and applies it inside the next Begin. Only the window name is needed, so the caller
+   never touches widget state - and hud_settings_collapsed() reports what was really drawn. */
+void hud_settings_collapse(hud* h, int collapsed) {
+  if (!h->ctx) return;
+  igSetWindowCollapsed_Str("Settings", collapsed != 0, ImGuiCond_Always);
+}
+
+int hud_settings_collapsed(const hud* h) { return h->settings_collapsed; }
 
 void hud_settings_place(hud* h, float x, float y, float w) {
   h->settings_placed = 1;
+  h->settings_pos_forced = 1; /* the caller owns the position this frame, ImGui's own value is not used */
   h->settings_x = x;
   h->settings_y = y;
   if (w > 0.0f) h->settings_w = w;
