@@ -7,10 +7,13 @@ C11 без внешних библиотек кроме GLFW и Dear ImGui. **П
 ![Viewer: shaded Utah teapot on a sky-lit background, three HUD panels (stats, settings widgets,
 keyboard hints)](docs/viewer-window.png)
 
-На скриншоте: реальное окно 1280×800 на дефолтных настройках (`fov 60 deg`, перспектива, `sky light` и
-`outline` включены). Utah teapot (1250 граней), шейдинг с двумя light'ами и небом, маска под текстом в
-трёх панелях HUD: статистика (слева сверху), панель виджетов Settings (слева, скроллable), подсказки
-hotkeys (внизу по центру). Outline не показан: грань под курсором не выбрана.
+На скриншоте: реальное окно 1280×800 на дефолтных настройках (`fov 45 deg`, перспектива, shading,
+`sky light` и `outline` включены, фон панелей 0.45, текст 0.78 → 13.26 px). Utah teapot (1250 граней),
+шейдинг с light'ом, солнцем и небом, маска под текстом в трёх панелях HUD: статистика (слева сверху —
+FPS, координаты и скорость камеры), панель виджетов Settings (слева — от «Render mode» до
+«Settings width», целиком без скролл-бара при высоте 800 px; ☰ сворачивает её в узкую вкладку),
+подсказки hotkeys (внизу по центру). Контур силуэта включён, грань под курсором не выбрана —
+подсветка грани не показана.
 
 ## Что делает
 
@@ -28,7 +31,8 @@ hotkeys (внизу по центру). Outline не показан: грань 
   там не срабатывают.
 - **`settings.ini` рядом с бинарём** — 24 ключей (fov, дистанка, орто-масштаб, яркости
   света/неба/поверхности/фона, горизонт неба, azimuth солнца, контур и его видимость,
-  размер панели и её видимость, wireframe, орто, видимость карточек, шрифт HUD,
+  размер панели и её видимость, wireframe, орто, видимость карточек, шрифт HUD (множитель над
+  базовыми 17 px: дефолт 0.78 → 13.26 px, диапазон 0.6…2.5),
   плотность фона панелей, ширина подсказок и карточки). Один источник правды: таблица
   `SETTINGS_FIELDS[]` — ключ, диапазон, дефолт и виджеты из одной строки. Файл перезаписывается
   после отпускания виджета, после изменения с клавиатуры и при закрытии окна; читается только
@@ -54,8 +58,8 @@ hotkeys (внизу по центру). Outline не показан: грань 
   (2–35% кадра, контраст ≥ 600), pick-пиксель в 20 px от центра, identity грани (ordinal +
   номера вершин + нормали), Tab-шаг, отсутствие чёрных пикселей после
   resize, gaps HUD ≤ 2 px, wrap подсказок, roundtrip `settings.ini` и поведение панели виджетов
-  (гейт мыши, rect, контраст, room+scrollbar, fold/unfold в вкладку). 11 разделов, 78 проверок,
-  пороги относительные, чтобы пережить другой GPU/AA.
+  (гейт мыши, rect, контраст, room+scrollbar, fold/unfold в вкладку, размер глифа HUD). 11 разделов,
+  82 проверка, пороги относительные, чтобы пережить другой GPU/AA.
 
 ## Стек
 
@@ -89,7 +93,7 @@ make test       # selftest + tests/run_tests.ps1
 ./viewer.exe                     # Utah teapot
 ./viewer.exe assets/cube.obj     # свой файл
 ./viewer.exe --render assets/cube.obj tests/out/frame.bmp 800 600   # offscreen BMP без окна
-./viewer.exe --selftest          # численные проверки: 11 разделов, 81 строка ok, итог selftest: PASS
+./viewer.exe --selftest          # численные проверки: 11 разделов, 82 строка ok, итог selftest: PASS
 ```
 
 ### Управление
@@ -117,15 +121,17 @@ make test       # selftest + tests/run_tests.ps1
 
 ## Проверка
 
-Публичная проверка — `make test`: сборка, `./viewer.exe --selftest` (11 разделов, 81 проверок,
+Публичная проверка — `make test`: сборка, `./viewer.exe --selftest` (11 разделов, 82 проверок,
 exit 0), `tests/run_tests.ps1` (BMP-метрики: coverage, outline, picking, resize, wireframe,
 offscreen). Проверки числовые; пороги относительные.
 Состав проверок сверяется из вывода, а не «из головы»:
 
 ```powershell
 ./viewer.exe --selftest | Select-String '^selftest: '   # 11 заголовков разделов + итоговая строка
-./viewer.exe --selftest | Select-String '^\s+ok ' | Measure-Object   # 81 проверка, FAIL нет
-``` `python tests/py/settings_ini_smoke.py` сверяет
+./viewer.exe --selftest | Select-String '^\s+ok ' | Measure-Object   # 82 проверка, FAIL нет
+```
+
+`python tests/py/settings_ini_smoke.py` сверяет
 `settings.ini` с независимым Python-парсером: состав ключей (24), формат `key = value`,
 `true/false` для булевых, три числа для RGB и все значения в своих диапазонах; битый файл
 даёт `FAIL` с номером строки и причиной.

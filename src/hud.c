@@ -18,8 +18,8 @@
    Env overrides (HUD_FONT_SCALE, HUD_W, HUD_HELP_W) exist for tuning - the pixel selftest
    reports WCAG contrast, ink coverage and the ink-to-panel-edge gap for whatever profile is
    in effect. Heights are never set: each panel auto-fits its text, so there are no empty rows. */
-#define HUD_FONT_BASE 17.0f
-#define HUD_FONT_SCALE 1.0f
+#define HUD_FONT_BASE 17.0f       /* px at scale 1.0; settings.hud_font_scale multiplies it */
+#define HUD_FONT_SCALE 0.78f      /* built-in default = settings_default: 13.26 px glyph (ADR PROJECT_MEMORY 4.24) */
 #define HUD_MARGIN 8.0f
 #define HUD_STATS_W 0.0f    /* 0 = auto width; HUD_W pins it when set */
 #define HUD_HELP_MIN_W 300.0f   /* floor: width normally comes from the hint strings themselves */
@@ -131,8 +131,8 @@ int hud_init(hud* h, void* window, char* err, size_t errcap) {
   h->settings_visible = 1;
   h->settings_placed = 0;
   h->settings_w = env_f("HUD_SETTINGS_W", HUD_SETTINGS_W);
-  printf("hud: imgui %s, font scale %.2f, stats width %s, help %.0f px wide (heights auto-fit), settings panel %.0f px wide\n",
-         igGetVersion(), scale, sw > 0.0f ? "pinned by HUD_W" : "auto-fit to text", hw, h->settings_w);
+  printf("hud: imgui %s, font scale %.2f (%.2f px glyph), stats width %s, help %.0f px wide (heights auto-fit), settings panel %.0f px wide\n",
+         igGetVersion(), scale, hud_font_px(h), sw > 0.0f ? "pinned by HUD_W" : "auto-fit to text", hw, h->settings_w);
   return 0;
 }
 
@@ -472,6 +472,14 @@ void hud_settings_show(hud* h, int visible) {
 }
 int hud_settings_visible(const hud* h) { return h->settings_visible && h->settings_rect[2] > h->settings_rect[0]; }
 int hud_hint_lines(const hud* h) { return h->hint_lines; }
+
+/* Effective glyph size in px: the style bakes FontSizeBase and FontScaleMain and
+   io.DisplayFramebufferScale is 1, so GetFontSize() = HUD_FONT_BASE * font_scale. */
+float hud_font_px(const hud* h) { return h->font_scale * HUD_FONT_BASE; }
+
+/* The base glyph size this module bakes at scale 1.0 - exposed so the selftest can check that
+   the settings default and the HUD profile describe the same pixel size. */
+float hud_font_base(void) { return HUD_FONT_BASE; }
 float hud_settings_room(const hud* h) { return h->settings_room; }
 float hud_settings_scroll(const hud* h) { return h->ctx ? h->settings_scroll : 0.0f; }
 int hud_mouse_busy(const hud* h) { return h->ctx ? h->mouse_busy : 0; }
@@ -542,7 +550,7 @@ int hud_set_font_scale(hud* h, float scale) {
   }
   h->font_scale = scale;
   h->text_ready = io->FontDefault != NULL;
-  printf("hud: font scale %.2f (glyph atlas rebuilt on the next frame)\n", scale);
+  printf("hud: font scale %.2f (%.2f px glyph) - atlas rebuilt on the next frame\n", scale, hud_font_px(h));
   return 1;
 }
 

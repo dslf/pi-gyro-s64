@@ -94,6 +94,8 @@ void hud_settings_show(hud* h, int visible);
 int  hud_settings_visible(const hud* h);
 /* How many hint lines the last frame showed: 2 = all of them, fewer on a small frame. */
 int  hud_hint_lines(const hud* h);
+float hud_font_px(const hud* h);   /* effective glyph size in px: HUD_FONT_BASE * font_scale */
+float hud_font_base(void);         /* glyph size at scale 1.0, the px the scale multiplies */
 /* Space left under the statistics card on the last frame; 0 means no room for the panel. */
 float hud_settings_room(const hud* h);
 /* Scroll offset of the settings window on the last frame (0 = list at the top). Non-zero also

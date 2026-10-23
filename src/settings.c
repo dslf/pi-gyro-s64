@@ -29,7 +29,7 @@ static const set_field FIELDS[] = {
   F(wireframe,       "wireframe",       "wireframe",         "surface", SET_BOOL,  0.0f, 1.0f,  0.0f,      NULL),
   F(bg_rgb,          "bg_rgb",          "background colour", "scene",   SET_RGB,   0.0f, 1.0f,  0.0f,      NULL),
   F(outline_rgb,     "outline_rgb",     "outline colour",    "scene",   SET_RGB,   0.0f, 1.0f,  0.0f,      NULL),
-  F(hud_font_scale,  "hud_font_scale",  "hud font scale",    "overlay", SET_FLOAT, 0.6f, 2.5f,  1.0f,      "%.2f"),
+  F(hud_font_scale,  "hud_font_scale",  "hud font scale",    "overlay", SET_FLOAT, 0.6f, 2.5f,  0.78f,     "%.2f"),
   F(hud_bg_alpha,    "hud_bg_alpha",    "panel opacity",     "overlay", SET_FLOAT, 0.0f, 1.0f,  0.94f,     "%.2f"),
   F(hud_info_visible,"hud_info_visible","info panels",       "overlay", SET_BOOL,  0.0f, 1.0f,  1.0f,      NULL),
   F(hud_help_w,      "hud_help_w",      "hint width cap",    "overlay", SET_FLOAT, 300.0f, 1200.0f, 760.0f, "%.0f px"),

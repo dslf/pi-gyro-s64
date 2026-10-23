@@ -1670,11 +1670,27 @@ static void settings_selftest(app* a, int* fails) {
   settings_default(&d);
   int defaults_ok = d.fov_deg == 60.0f && d.hud_settings_visible == 1 && d.sky_visible == 1 &&
                     d.outline_visible == 1 && d.settings_w == 460.0f && d.hud_bg_alpha == 0.94f &&
-                    !settings_dirty(&d);
-  printf("  %s defaults: fov %.0f, panel %d px wide, shown %d, sky %d, outline %d\n",
+                    fabsf(d.hud_font_scale - 0.78f) < 1e-6f && !settings_dirty(&d);
+  printf("  %s defaults: fov %.0f, panel %d px wide, shown %d, sky %d, outline %d, hud font scale %.2f\n",
          defaults_ok ? "ok  " : "FAIL", d.fov_deg, (int)d.settings_w, d.hud_settings_visible,
-         d.sky_visible, d.outline_visible);
+         d.sky_visible, d.outline_visible, d.hud_font_scale);
   if (!defaults_ok) (*fails)++;
+
+  /* The HUD profile baked before settings.ini and the settings default must be the same pixel
+     size, or --render/--selftest metrics and the interactive panel would disagree (ADR 4.24).
+     HUD_FONT_SCALE is a tuning knob that overrides the baked profile on purpose, so the equality
+     against the settings default is only asserted when no override is in effect. */
+  const int env_override = getenv("HUD_FONT_SCALE") != NULL;
+  float px = hud_font_px(&a->hudl);
+  int font_agrees = fabsf(px - hud_font_base() * a->hudl.font_scale) < 0.01f &&
+                    (env_override || fabsf(a->hudl.font_scale - d.hud_font_scale) < 1e-6f);
+  if (env_override)
+    printf("  %s hud glyph size: base %.0f px x profile %.2f = %.2f px (HUD_FONT_SCALE override, settings default %.2f)\n",
+           font_agrees ? "ok  " : "FAIL", hud_font_base(), a->hudl.font_scale, px, d.hud_font_scale);
+  else
+    printf("  %s hud glyph size: base %.0f px x scale %.2f = %.2f px == settings default %.2f\n",
+           font_agrees ? "ok  " : "FAIL", hud_font_base(), d.hud_font_scale, px, d.hud_font_scale);
+  if (!font_agrees) (*fails)++;
 
   /* Roundtrip over every key: save then read back into a fresh struct. */
   settings s;
@@ -1920,28 +1936,47 @@ static void settings_selftest(app* a, int* fails) {
   printf("  %s mouse gate: inside %d, outside %d\n", gate_ok ? "ok  " : "FAIL", inside, outside);
   if (!gate_ok) (*fails)++;
 
-  /* The wheel over the panel scrolls the widget list. At a narrow width the list is taller than
-     the room, so a wheel step must move the content. An offscreen framebuffer has no real
-     pointer, so the cursor and the wheel are injected into ImGui's event queue (hud_warp_mouse).
-     Before this existed the panel carried NoScrollWithMouse and the wheel did nothing there.
-     The wheel itself is not measured here - scroll_y is, which is the state the user sees. */
+  /* The wheel over the panel scrolls the widget list. A wheel step only does something when the
+     list is taller than the room, so the fixture has to overflow: at the readable default font
+     (13.26 px) the 1280x900 room is taller than the list, so this step runs in a 1280x520 frame.
+     An offscreen framebuffer has no real pointer, so the cursor and the wheel are injected into
+     ImGui's event queue (hud_warp_mouse). Before this existed the panel carried NoScrollWithMouse
+     and the wheel did nothing there. The wheel itself is not measured here - scroll_y is, which is
+     the state the user sees. */
   const float w_saved = a->set.settings_w;
   hud_set_panel_width(&a->hudl, 170.0f);
   draw_scene(a, &fb);
   int nx0 = 0, ny0 = 0, nx1 = 0, ny1 = 0;
   hud_rect(&a->hudl, HUD_PANEL_SETTINGS, &nx0, &ny0, &nx1, &ny1);
-  hud_warp_mouse(&a->hudl, (nx0 + nx1) * 0.5, (ny0 + ny1) * 0.5, 0, 0.0f);
-  draw_scene(a, &fb);
-  const float scroll_top = hud_settings_scroll(&a->hudl);
-  hud_warp_mouse(&a->hudl, (nx0 + nx1) * 0.5, (ny0 + ny1) * 0.5, 0, -1.0f);
-  draw_scene(a, &fb);
-  const float scroll_down = hud_settings_scroll(&a->hudl);
-  const int scrolled = scroll_down > scroll_top + 5.0f;
-  printf("  %s wheel over the panel scrolls the widget list: scroll_y %.1f -> %.1f px "
-         "(rect %d x %d, room %.0f px)\n", scrolled ? "ok  " : "FAIL",
-         (double)scroll_top, (double)scroll_down, nx1 - nx0, ny1 - ny0,
-         (double)hud_settings_room(&a->hudl));
-  if (!scrolled) (*fails)++;
+
+  framebuffer tight;
+  memset(&tight, 0, sizeof tight);
+  if (fb_create(&tight, PW, 520, err, sizeof err) != 0) {
+    printf("  FAIL wheel fixture frame 1280x520: %s\n", err);
+    (*fails)++;
+  } else {
+    draw_scene(a, &tight);
+    int wx0 = 0, wy0 = 0, wx1 = 0, wy1 = 0;
+    hud_rect(&a->hudl, HUD_PANEL_SETTINGS, &wx0, &wy0, &wx1, &wy1);
+    const float wroom = hud_settings_room(&a->hudl);
+    /* The panel height is clamped to the room, so overflow is not visible in the rect - the
+       scroll step below is what proves the list is taller than what is shown. */
+    printf("  wheel fixture 1280 x 520: panel rect %d x %d px clamped to room %.0f px\n",
+           wx1 - wx0, wy1 - wy0, (double)wroom);
+
+    hud_warp_mouse(&a->hudl, (wx0 + wx1) * 0.5, (wy0 + wy1) * 0.5, 0, 0.0f);
+    draw_scene(a, &tight);
+    const float scroll_top = hud_settings_scroll(&a->hudl);
+    hud_warp_mouse(&a->hudl, (wx0 + wx1) * 0.5, (wy0 + wy1) * 0.5, 0, -1.0f);
+    draw_scene(a, &tight);
+    const float scroll_down = hud_settings_scroll(&a->hudl);
+    const int scrolled = scroll_down > scroll_top + 5.0f;
+    printf("  %s wheel over the panel scrolls the widget list: scroll_y %.1f -> %.1f px "
+           "(rect %d x %d, room %.0f px)\n", scrolled ? "ok  " : "FAIL",
+           (double)scroll_top, (double)scroll_down, wx1 - wx0, wy1 - wy0, (double)wroom);
+    if (!scrolled) (*fails)++;
+    fb_free(&tight);
+  }
 
   /* A drag owns the mouse: while a HUD gesture is held the camera must stay out of it. The title
      bar is grabbed first - its geometry is known and it is the window's own hit area - and the
